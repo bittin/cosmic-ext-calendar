@@ -1,11 +1,16 @@
-use crate::shared::storage::LocalStorage;
 use crate::Result;
+use crate::app::{AppModel, CalendarAction, Message};
+use crate::shared::storage::LocalStorage;
 use chrono::Offset;
+use cosmic::style::Button;
+use cosmic::widget::{button, menu};
 use cosmic::{
-    iced::{widget::text::Wrapping, Length},
+    Element,
+    iced::{Length, widget::text::Wrapping},
     theme::spacing,
-    widget, Element,
+    widget,
 };
+use std::collections::HashMap;
 use time::{Date, Duration, Month, OffsetDateTime, Time, UtcOffset};
 
 mod day;
@@ -29,7 +34,105 @@ pub(crate) fn display_time(date: OffsetDateTime, zone: Option<chrono_tz::Tz>) ->
 
 use month::Occurrence;
 
-fn all_day_cell(date: Date, items: &[Occurrence]) -> Element<'static, crate::app::Message> {
+pub(crate) type EventSelection = (crate::shared::ids::EventId, OffsetDateTime);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarAnchor {
+    Month(Date, EventSelection),
+    Agenda(Date, EventSelection),
+    Grid(OffsetDateTime, EventSelection),
+    AllDay(Date, EventSelection),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EventMenuAction(CalendarAction, Option<EventSelection>, OffsetDateTime);
+
+impl menu::Action for EventMenuAction {
+    type Message = Message;
+
+    fn message(&self) -> Message {
+        Message::CalendarAction(self.0, self.1, self.2)
+    }
+}
+
+fn context_menu<'a>(
+    content: impl Into<Element<'a, Message>>,
+    items: Vec<menu::Item<EventMenuAction, String>>,
+) -> Element<'a, Message> {
+    widget::context_menu(content, Some(menu::items(&HashMap::new(), items))).into()
+}
+
+fn event_card_style(
+    active: impl Fn(bool, &cosmic::Theme) -> button::Style + Clone + 'static,
+    disabled: impl Fn(&cosmic::Theme) -> button::Style + 'static,
+) -> Button {
+    Button::Custom {
+        active: Box::new(active.clone()),
+        hovered: Box::new(active.clone()),
+        pressed: Box::new(active),
+        disabled: Box::new(disabled),
+    }
+}
+
+fn event_button_style(selected: bool, normal: Button, selection: Button) -> Button {
+    use button::Catalog;
+
+    let style = if selected { selection } else { normal };
+    let style = std::rc::Rc::new(style);
+    let active = style.clone();
+    event_card_style(
+        move |focused, theme| theme.active(focused, false, &active),
+        move |theme| theme.disabled(&style),
+    )
+}
+
+fn event_target<'a>(
+    app: &'a AppModel,
+    button: impl Into<Element<'a, Message>>,
+    event: &Occurrence,
+    anchor: CalendarAnchor,
+) -> Element<'a, Message> {
+    let item = |label, action| {
+        menu::Item::Button(
+            label,
+            None,
+            EventMenuAction(action, Some(event.key()), event.display_start),
+        )
+    };
+    let mut items = vec![
+        item(crate::fl!("edit-event"), CalendarAction::Edit),
+        menu::Item::Divider,
+        item(crate::fl!("calendar-cut"), CalendarAction::Cut),
+        item(crate::fl!("calendar-copy"), CalendarAction::Copy),
+    ];
+    if app.calendar_can_paste() {
+        items.push(item(crate::fl!("calendar-paste"), CalendarAction::Paste));
+    }
+    items.extend([
+        item(crate::fl!("calendar-duplicate"), CalendarAction::Duplicate),
+        menu::Item::Divider,
+        item(crate::fl!("delete"), CalendarAction::Delete),
+    ]);
+    app.attach_calendar_popup(context_menu(button, items), Some(anchor))
+}
+
+fn paste_target<'a>(
+    app: &'a AppModel,
+    button: impl Into<Element<'a, Message>>,
+    date: OffsetDateTime,
+) -> Element<'a, Message> {
+    if !app.calendar_can_paste() {
+        return button.into();
+    }
+    let items = vec![menu::Item::Button(
+        crate::fl!("calendar-paste"),
+        None,
+        EventMenuAction(CalendarAction::Paste, None, date),
+    )];
+    context_menu(button, items)
+}
+
+fn all_day_cell<'a>(date: Date, items: &[Occurrence], app: &'a AppModel) -> Element<'a, Message> {
     let mut column = widget::column(Vec::new())
         .width(Length::Fill)
         .spacing(spacing().space_xxxs);
@@ -37,7 +140,9 @@ fn all_day_cell(date: Date, items: &[Occurrence]) -> Element<'static, crate::app
         .iter()
         .filter(|item| item.time.is_none() && item.first <= date && date <= item.last)
     {
-        column = column.push(
+        let anchor = CalendarAnchor::AllDay(date, item.key());
+        column = column.push(event_target(
+            app,
             widget::button::custom(
                 widget::container(
                     widget::text::caption(item.title.clone()).wrapping(Wrapping::None),
@@ -47,20 +152,27 @@ fn all_day_cell(date: Date, items: &[Occurrence]) -> Element<'static, crate::app
             )
             .width(Length::Fill)
             .padding([4, 6])
-            .class(cosmic::style::Button::Text)
+            .class(event_button_style(
+                item.selected,
+                Button::Text,
+                Button::Standard,
+            ))
             .name(item.title.clone())
-            .on_press(item.open()),
-        );
+            .on_press(item.open(anchor)),
+            item,
+            anchor,
+        ));
     }
     column.into()
 }
 
-fn time_slot(
+fn time_slot<'a>(
     date: OffsetDateTime,
     hour: u8,
     half_hour: bool,
     items: &[Occurrence],
-) -> Element<'static, crate::app::Message> {
+    app: &'a AppModel,
+) -> Element<'a, Message> {
     let minute = if half_hour { 30 } else { 0 };
     let cell_time = date.replace_time(Time::from_hms(hour, minute, 0).unwrap());
     let start = cell_time.time();
@@ -80,21 +192,26 @@ fn time_slot(
         })
         .peekable();
     if events.peek().is_none() {
-        return widget::button::custom(widget::text(""))
-            .name(crate::fl!(
-                "calendar-add-at",
-                date = month::agenda_date(date.date()),
-                time = format!("{hour:02}:{minute:02}")
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .class(cosmic::style::Button::Text)
-            .on_press(crate::app::Message::AddEvent(cell_time))
-            .into();
+        return paste_target(
+            app,
+            widget::button::custom(widget::text(""))
+                .name(crate::fl!(
+                    "calendar-add-at",
+                    date = month::agenda_date(date.date()),
+                    time = format!("{hour:02}:{minute:02}")
+                ))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .class(cosmic::style::Button::Text)
+                .on_press(crate::app::Message::AddEvent(cell_time)),
+            cell_time,
+        );
     }
     events
         .fold(widget::row(Vec::new()).width(Length::Fill), |row, item| {
-            row.push(
+            let anchor = CalendarAnchor::Grid(cell_time, item.key());
+            row.push(event_target(
+                app,
                 widget::button::custom(
                     widget::container(
                         widget::text::caption(item.title.clone()).wrapping(Wrapping::None),
@@ -104,10 +221,16 @@ fn time_slot(
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .class(cosmic::style::Button::Standard)
+                .class(event_button_style(
+                    item.selected,
+                    Button::Standard,
+                    Button::Suggested,
+                ))
                 .name(item.title.clone())
-                .on_press(item.open()),
-            )
+                .on_press(item.open(anchor)),
+                item,
+                anchor,
+            ))
         })
         .into()
 }
@@ -117,6 +240,7 @@ pub struct LocalCalendar {
     pub current_date: OffsetDateTime,
     pub selected_date: OffsetDateTime,
     pub display_timezone: Option<chrono_tz::Tz>,
+    pub selected_event: Option<EventSelection>,
 }
 
 impl Default for LocalCalendar {
@@ -132,6 +256,7 @@ impl Default for LocalCalendar {
             current_date,
             selected_date: current_date,
             display_timezone: None,
+            selected_event: None,
         }
     }
 }
@@ -143,20 +268,36 @@ impl LocalCalendar {
             current_date,
             selected_date: current_date,
             display_timezone: None,
+            selected_event: None,
         }
     }
 
-    pub fn month_view<'a>(&self, storage: &LocalStorage) -> Element<'a, crate::app::Message> {
-        month::month_view(*self, storage)
+    pub fn month_view<'a>(
+        &self,
+        storage: &LocalStorage,
+        app: &'a AppModel,
+    ) -> Element<'a, crate::app::Message> {
+        month::month_view(*self, storage, app)
     }
 
-    pub fn day_agenda<'a>(&self, storage: &LocalStorage) -> Element<'a, crate::app::Message> {
-        month::agenda(self.selected_date.date(), storage, self.display_timezone)
+    pub fn day_agenda<'a>(
+        &self,
+        storage: &LocalStorage,
+        app: &'a AppModel,
+    ) -> Element<'a, crate::app::Message> {
+        month::agenda(
+            self.selected_date.date(),
+            storage,
+            self.display_timezone,
+            self.selected_event,
+            app,
+        )
     }
 
     pub fn week_view<'a>(
-        &'a self,
+        &self,
         storage: &LocalStorage,
+        app: &'a AppModel,
     ) -> impl Into<Element<'a, crate::app::Message>> {
         let selected_date = self.selected_date;
         let days_since_monday = i64::from(selected_date.weekday().number_days_from_monday());
@@ -178,14 +319,20 @@ impl LocalCalendar {
 
         let first = week_start.date();
         let last = first + Duration::days(6);
-        let items = month::occurrences(storage, first, last, self.display_timezone);
-        let time_grid = week::week_grid(&week_start, &items);
+        let items = month::occurrences(
+            storage,
+            first,
+            last,
+            self.display_timezone,
+            self.selected_event,
+        );
+        let time_grid = week::week_grid(&week_start, &items, app);
         let all_day = (0..7).fold(
             widget::row(Vec::new()).push(
                 widget::container(widget::text::caption(crate::fl!("all-day")))
                     .width(week::TIME_COLUMN_WIDTH),
             ),
-            |row, day| row.push(all_day_cell(first + Duration::days(day), &items)),
+            |row, day| row.push(all_day_cell(first + Duration::days(day), &items, app)),
         );
 
         widget::column(Vec::new())
@@ -200,15 +347,22 @@ impl LocalCalendar {
     }
 
     pub fn day_view<'a>(
-        &'a self,
+        &self,
         storage: &LocalStorage,
+        app: &'a AppModel,
     ) -> impl Into<Element<'a, crate::app::Message>> {
         let date = self.selected_date.date();
-        let items = month::occurrences(storage, date, date, self.display_timezone);
-        let time_grid = day::single_day_time_grid(&self.selected_date, &items);
+        let items = month::occurrences(
+            storage,
+            date,
+            date,
+            self.display_timezone,
+            self.selected_event,
+        );
+        let time_grid = day::single_day_time_grid(&self.selected_date, &items, app);
         let all_day = widget::row(Vec::new())
             .push(widget::text::caption(crate::fl!("all-day")).width(100))
-            .push(all_day_cell(date, &items));
+            .push(all_day_cell(date, &items, app));
 
         widget::column(Vec::new())
             .push(all_day)

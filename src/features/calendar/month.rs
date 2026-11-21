@@ -1,12 +1,13 @@
 use cosmic::{
-    iced::{alignment::Vertical, widget::Id, Border, Color, Length},
-    theme::{spacing, Container},
-    widget, Element,
+    Element,
+    iced::{Border, Color, Length, alignment::Vertical, widget::Id},
+    theme::{Container, spacing},
+    widget,
 };
 use time::{Date, Duration, Month, OffsetDateTime, Time, Weekday};
 
 use crate::{
-    app::Message,
+    app::{AppModel, Message},
     features::{
         calendar_management::model::{CalendarKey, LocalCalendarMeta},
         event::model::{Event, EventTime},
@@ -15,7 +16,10 @@ use crate::{
     shared::{ids::EventId, storage::LocalStorage},
 };
 
-use super::{display_time, LocalCalendar};
+use super::{
+    CalendarAnchor, EventSelection, LocalCalendar, display_time, event_button_style,
+    event_card_style, event_target, paste_target,
+};
 
 const DAYS_PER_WEEK: usize = 7;
 const EVENT_ROWS: usize = 2;
@@ -24,6 +28,7 @@ const COMPACT_WIDTH: f32 = 520.0;
 
 pub(super) struct Occurrence {
     id: EventId,
+    pub(super) selected: bool,
     pub(super) display_start: OffsetDateTime,
     pub(super) display_end: OffsetDateTime,
     pub(super) start: OffsetDateTime,
@@ -40,8 +45,12 @@ impl Occurrence {
         self.first != self.last
     }
 
-    pub(super) fn open(&self) -> Message {
-        Message::OpenEventEditor(Some(self.id), self.start)
+    pub(super) fn key(&self) -> EventSelection {
+        (self.id, self.start)
+    }
+
+    pub(super) fn open(&self, anchor: CalendarAnchor) -> Message {
+        Message::CalendarEventClicked(self.key(), anchor)
     }
 }
 
@@ -50,8 +59,9 @@ pub(super) fn occurrences(
     first: Date,
     last: Date,
     zone: Option<chrono_tz::Tz>,
+    selection: Option<EventSelection>,
 ) -> Vec<Occurrence> {
-    occurrences_with_calendars(
+    let mut items = occurrences_with_calendars(
         storage.all_events().into_iter().map(|event| {
             let calendar = match event.calendar {
                 CalendarKey::Local(id) => storage.get_calendar(id),
@@ -62,7 +72,11 @@ pub(super) fn occurrences(
         first,
         last,
         zone,
-    )
+    );
+    for item in &mut items {
+        item.selected = Some(item.key()) == selection;
+    }
+    items
 }
 
 fn occurrences_with_calendars<'a>(
@@ -115,6 +129,7 @@ fn occurrences_with_calendars<'a>(
 
             items.push(Occurrence {
                 id: event.id,
+                selected: false,
                 start,
                 display_start,
                 display_end,
@@ -156,6 +171,7 @@ fn calendar_color(value: &str) -> Option<Color> {
 pub(super) fn month_view<'a>(
     calendar: LocalCalendar,
     storage: &LocalStorage,
+    app: &'a AppModel,
 ) -> Element<'a, Message> {
     let selected = calendar.selected_date.date();
     let today = calendar.current_date.date();
@@ -165,7 +181,13 @@ pub(super) fn month_view<'a>(
     let weeks =
         (leading + usize::from(selected.month().length(selected.year()))).div_ceil(DAYS_PER_WEEK);
     let last = first + Duration::days((weeks * DAYS_PER_WEEK - 1) as i64);
-    let items = occurrences(storage, first, last, calendar.display_timezone);
+    let items = occurrences(
+        storage,
+        first,
+        last,
+        calendar.display_timezone,
+        calendar.selected_event,
+    );
 
     widget::responsive(move |size| {
         let compact = size.width < COMPACT_WIDTH;
@@ -227,6 +249,7 @@ pub(super) fn month_view<'a>(
                 &items,
                 compact,
                 week_height,
+                app,
             ));
         }
 
@@ -265,6 +288,7 @@ fn week_view<'a>(
     items: &[Occurrence],
     compact: bool,
     height: f32,
+    app: &'a AppModel,
 ) -> Element<'a, Message> {
     let last = first + Duration::days((DAYS_PER_WEEK - 1) as i64);
     let week_items: Vec<_> = items
@@ -325,7 +349,8 @@ fn week_view<'a>(
     for (day, (count, hidden)) in counts.into_iter().zip(hidden).enumerate() {
         let date = first + Duration::days(day as i64);
         let outside = date.month() != selected.month();
-        backgrounds = backgrounds.push(
+        backgrounds = backgrounds.push(paste_target(
+            app,
             widget::container(widget::space::vertical())
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -351,7 +376,8 @@ fn week_view<'a>(
                         ..Default::default()
                     }
                 })),
-        );
+            date.with_hms(9, 0, 0).unwrap().assume_utc(),
+        ));
 
         let marker: Element<'_, Message> = if compact && count > 0 {
             color_dot(None)
@@ -402,6 +428,16 @@ fn week_view<'a>(
         .height(if compact { 44.0 } else { 26.0 })
         .class(cosmic::style::Button::Text)
         .on_press(Message::ShowDayAgenda(date));
+        let day_button = paste_target(
+            app,
+            day_button,
+            date.with_hms(9, 0, 0).unwrap().assume_utc(),
+        );
+        let day_button = if let Some(anchor) = app.compact_month_anchor(date, compact) {
+            app.attach_calendar_popup(day_button, Some(anchor))
+        } else {
+            day_button
+        };
         dates = dates.push(
             widget::container(day_button)
                 .padding([2, 3])
@@ -441,11 +477,15 @@ fn week_view<'a>(
                 );
             }
             row = row.push(
-                widget::container(event_button(segment.event))
-                    .padding([0, 3])
-                    .width(Length::FillPortion(
-                        (segment.last - segment.first + 1) as u16,
-                    )),
+                widget::container(event_button(
+                    segment.event,
+                    first + Duration::days(segment.first as i64),
+                    app,
+                ))
+                .padding([0, 3])
+                .width(Length::FillPortion(
+                    (segment.last - segment.first + 1) as u16,
+                )),
             );
             cursor = segment.last + 1;
         }
@@ -467,7 +507,7 @@ fn week_view<'a>(
         .into()
 }
 
-fn event_button<'a>(event: &Occurrence) -> Element<'a, Message> {
+fn event_button<'a>(event: &Occurrence, date: Date, app: &'a AppModel) -> Element<'a, Message> {
     use cosmic::iced::advanced::text::Wrapping;
 
     let band = event.spans_dates() || event.time.is_none();
@@ -486,30 +526,32 @@ fn event_button<'a>(event: &Occurrence) -> Element<'a, Message> {
     use widget::button::Catalog;
 
     let color = event.color;
-    let style = Button::Custom {
-        active: Box::new(move |focused, theme| {
+    let selected = event.selected;
+    let style = event_card_style(
+        move |focused, theme| {
             let mut style = theme.active(focused, false, &Button::MenuItem);
-            style.background = band.then(|| {
+            style.background = (band || selected).then(|| {
                 let base = theme.current_container().base.into();
                 let accent = accent_or_calendar_color(theme, color);
-                blend(base, accent, 0.22).into()
+                blend(base, accent, if selected { 0.48 } else { 0.22 }).into()
             });
             style.border_radius = 5.0.into();
             style
-        }),
-        hovered: Box::new(|focused, theme| theme.hovered(focused, false, &Button::MenuItem)),
-        pressed: Box::new(|focused, theme| theme.pressed(focused, false, &Button::MenuItem)),
-        disabled: Box::new(|theme| theme.disabled(&Button::MenuItem)),
-    };
+        },
+        |theme| theme.disabled(&Button::MenuItem),
+    );
+    let anchor = CalendarAnchor::Month(date, event.key());
     let button = widget::button::custom(content)
         .name(label.clone())
         .padding([0, 4])
         .height(EVENT_HEIGHT)
         .width(Length::Fill)
         .class(style)
-        .on_press(event.open());
+        .on_press(event.open(anchor));
     widget::tooltip(
-        widget::container(button).width(Length::Fill).clip(true),
+        widget::container(event_target(app, button, event, anchor))
+            .width(Length::Fill)
+            .clip(true),
         widget::text::caption(label),
         widget::tooltip::Position::Top,
     )
@@ -545,8 +587,10 @@ pub(super) fn agenda<'a>(
     date: Date,
     storage: &LocalStorage,
     zone: Option<chrono_tz::Tz>,
+    selection: Option<EventSelection>,
+    app: &'a AppModel,
 ) -> Element<'a, Message> {
-    let items = occurrences(storage, date, date, zone);
+    let items = occurrences(storage, date, date, zone, selection);
     let mut content = widget::column(Vec::new())
         .spacing(spacing().space_xxs)
         .push(widget::text::heading(agenda_date(date)));
@@ -568,14 +612,22 @@ pub(super) fn agenda<'a>(
             let entry = widget::row(vec![color_dot(event.color), row.into()])
                 .spacing(spacing().space_xxs)
                 .align_y(Vertical::Center);
-            content = content.push(
+            let anchor = CalendarAnchor::Agenda(date, event.key());
+            content = content.push(event_target(
+                app,
                 widget::button::custom(entry)
                     .width(Length::Fill)
                     .padding(spacing().space_xs)
-                    .class(cosmic::style::Button::Text)
+                    .class(event_button_style(
+                        event.selected,
+                        cosmic::style::Button::Text,
+                        cosmic::style::Button::Standard,
+                    ))
                     .name(accessible_label)
-                    .on_press(event.open()),
-            );
+                    .on_press(event.open(anchor)),
+                &event,
+                anchor,
+            ));
         }
     }
     content.into()

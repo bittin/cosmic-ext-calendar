@@ -1,3 +1,4 @@
+use crate::app::AppModel;
 use cosmic::{
     iced::{alignment::Horizontal, Length},
     theme::spacing,
@@ -10,18 +11,19 @@ use super::{time_slot, Occurrence};
 pub fn single_day_time_grid<'a>(
     selected_date: &OffsetDateTime,
     items: &[Occurrence],
+    app: &'a AppModel,
 ) -> impl Into<Element<'a, crate::app::Message>> {
     let mut main_column = widget::column(Vec::new()).spacing(0);
 
     for hour in 0..24 {
         main_column = main_column.push(widget::divider::horizontal::default());
 
-        let hour_row = single_day_hour_row(hour, false, selected_date, items);
+        let hour_row = single_day_hour_row(hour, false, selected_date, items, app);
         main_column = main_column.push(hour_row);
 
         main_column = main_column.push(widget::divider::horizontal::light());
 
-        let half_hour_row = single_day_hour_row(hour, true, selected_date, items);
+        let half_hour_row = single_day_hour_row(hour, true, selected_date, items, app);
         main_column = main_column.push(half_hour_row);
     }
 
@@ -33,6 +35,7 @@ fn single_day_hour_row<'a>(
     is_half_hour: bool,
     selected_date: &OffsetDateTime,
     items: &[Occurrence],
+    app: &'a AppModel,
 ) -> impl Into<Element<'a, crate::app::Message>> {
     let mut row = widget::row(Vec::new());
 
@@ -52,7 +55,7 @@ fn single_day_hour_row<'a>(
     row = row.push(time_container);
     row = row.push(widget::divider::vertical::default());
 
-    let time_cell = time_slot(*selected_date, hour, is_half_hour, items);
+    let time_cell = time_slot(*selected_date, hour, is_half_hour, items, app);
     row = row.push(time_cell);
 
     row.height(80)
