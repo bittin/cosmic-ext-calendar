@@ -1,83 +1,98 @@
-//! Periodic reminder-due checking and desktop notifications.
-//!
-//! Driven by a `cosmic::iced::time::every` tick in `AppModel::subscription`
-//! (see `Message::CheckReminders` in `src/app.rs`), which calls
-//! [`check_reminders`] on a blocking thread and folds the returned
-//! already-fired keys into `AppModel.fired_reminders` so the same reminder
-//! doesn't notify twice.
+//! Due reminder checks for events loaded by the desktop app.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use time::OffsetDateTime;
+use chrono::TimeZone;
+use time::{Duration, OffsetDateTime, UtcOffset};
 
-use crate::features::event::model::Event;
+use crate::features::event::model::{Event, EventTime};
+use crate::fl;
 use crate::shared::ids::EventId;
 use crate::shared::storage::LocalStorage;
 
-/// How far ahead to look for occurrences when checking for due reminders.
-/// Generous enough to cover any reasonable lead time set on a reminder.
-const LOOKAHEAD_HOURS: i64 = 48;
+const GRACE: Duration = Duration::minutes(5);
 
-/// A reminder is considered "due" once its trigger time falls within this
-/// many minutes of now, so a reminder isn't missed between ticks but also
-/// doesn't fire hours late after the app was closed and reopened.
-const GRACE_MINUTES: i64 = 5;
+pub type ReminderKey = (EventId, OffsetDateTime, i64);
 
-/// Scans `storage` for reminders that just became due (and aren't already in
-/// `already_fired`), fires a desktop notification for each, and returns
-/// their `(EventId, occurrence_start)` keys to be recorded as fired.
 pub fn check_reminders(
     storage: &Arc<Mutex<LocalStorage>>,
-    already_fired: &HashSet<(EventId, OffsetDateTime)>,
-) -> Vec<(EventId, OffsetDateTime)> {
+    already_fired: &HashSet<ReminderKey>,
+) -> Vec<ReminderKey> {
     let now = OffsetDateTime::now_utc();
-    let range = now..(now + time::Duration::hours(LOOKAHEAD_HOURS));
-
-    let storage = storage.lock().unwrap();
-    let mut newly_fired = Vec::new();
-
-    for event in storage.events_in_range(range.clone()) {
-        if event.reminders.is_empty() {
-            continue;
-        }
-
-        for occurrence_start in event.occurrences(range.clone()) {
-            let key = (event.id, occurrence_start);
-            if already_fired.contains(&key) {
-                continue;
-            }
-
-            let is_due = event.reminders.iter().any(|reminder| {
-                let trigger = occurrence_start - time::Duration::minutes(reminder.minutes_before);
-                trigger <= now && trigger > now - time::Duration::minutes(GRACE_MINUTES)
-            });
-
-            if is_due {
-                notify(event, occurrence_start);
-                newly_fired.push(key);
+    let mut queued = Vec::new();
+    let mut seen = HashSet::new();
+    {
+        let storage = storage.lock().unwrap();
+        for event in storage.all_events() {
+            let civil = event.floating || matches!(event.time, EventTime::AllDay { .. });
+            let padding = if civil { Duration::DAY } else { Duration::ZERO };
+            for reminder in &event.reminders {
+                let minutes = reminder.minutes_before;
+                let Some(seconds) = minutes.checked_mul(60).filter(|seconds| *seconds >= 0) else {
+                    continue;
+                };
+                let lead = Duration::seconds(seconds);
+                let end = now.saturating_add(lead);
+                let window = end.saturating_sub(GRACE + padding)
+                    ..end.saturating_add(padding + Duration::NANOSECOND);
+                for occurrence in event.occurrences(window) {
+                    let key = (event.id, occurrence, minutes);
+                    if already_fired.contains(&key) || !seen.insert(key) {
+                        continue;
+                    }
+                    let Some(start) = reminder_time(event, occurrence) else {
+                        continue;
+                    };
+                    let trigger = start.saturating_sub(lead);
+                    if trigger <= now && trigger > now - GRACE {
+                        queued.push((key, event.summary.clone(), start));
+                    }
+                }
             }
         }
     }
 
-    newly_fired
+    queued
+        .into_iter()
+        .filter_map(|(key, summary, start)| notify(&summary, start).then_some(key))
+        .collect()
 }
 
-fn notify(event: &Event, occurrence_start: OffsetDateTime) {
-    let body = format!(
-        "{:02}:{:02} on {}",
-        occurrence_start.hour(),
-        occurrence_start.minute(),
-        occurrence_start.date()
-    );
+fn reminder_time(event: &Event, occurrence: OffsetDateTime) -> Option<OffsetDateTime> {
+    if !event.floating && !matches!(event.time, EventTime::AllDay { .. }) {
+        return Some(occurrence);
+    }
 
-    if let Err(err) = notify_rust::Notification::new()
-        .appname("Calendar")
-        .summary(&event.summary)
+    let wall =
+        chrono::DateTime::from_timestamp(occurrence.unix_timestamp(), occurrence.nanosecond())?
+            .naive_utc();
+    let offset = chrono::Local
+        .from_local_datetime(&wall)
+        .earliest()?
+        .offset()
+        .local_minus_utc();
+    Some(occurrence.replace_offset(UtcOffset::from_whole_seconds(offset).ok()?))
+}
+
+fn notify(summary: &str, start: OffsetDateTime) -> bool {
+    let body = format!(
+        "{:02}:{:02} · {}",
+        start.hour(),
+        start.minute(),
+        start.date()
+    );
+    match notify_rust::Notification::new()
+        .appname(&fl!("app-title"))
+        .summary(summary)
         .body(&body)
         .icon("office-calendar-symbolic")
         .show()
     {
-        tracing::warn!("failed to show reminder notification: {err}");
+        Ok(_) => true,
+        Err(err) => {
+            tracing::warn!("failed to show reminder notification: {err}");
+            false
+        }
     }
 }

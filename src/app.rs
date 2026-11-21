@@ -4,7 +4,7 @@ use crate::features::calendar::LocalCalendar;
 use crate::features::event::recurrence::{RecurrenceEnd, RecurrenceFreq};
 use crate::features::calendar_management::state::{CalendarEditState, CalendarManagerState};
 use crate::features::event::state::{
-    build_reminders_model, event_editor_months, shift_event_editor_start, EventEditorState,
+    build_reminders_model, event_editor_months, shift_event_editor_start, EventEditorState, RecurrenceScope,
     EVENT_EDITOR_MINUTES, EVENT_EDITOR_YEARS,
 };
 use crate::shared::config::Config;
@@ -35,8 +35,18 @@ pub use flags::*;
 mod settings;
 pub use settings::*;
 
+use crate::features::event::notifications::{check_reminders, ReminderKey};
+
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
+
+#[derive(Default)]
+struct IcsImportState {
+    path: Option<PathBuf>,
+    calendar: Option<CalendarId>,
+    busy: bool,
+    result: Option<std::result::Result<(usize, usize), String>>,
+}
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
@@ -55,6 +65,8 @@ pub struct AppModel {
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     // Configuration data that persists between application runs.
     config: Config,
+    display_timezone_input: String,
+    ics_import: IcsImportState,
     // Calendar data that persists between application runs.
     calendar: LocalCalendar,
     // Local calendar/event storage, persisted to disk as JSON.
@@ -77,7 +89,8 @@ pub struct AppModel {
     search_query: String,
     // Reminders already notified this session, so the periodic check
     // doesn't re-fire the same notification every tick.
-    fired_reminders: std::collections::HashSet<(EventId, OffsetDateTime)>,
+    fired_reminders: std::collections::HashSet<ReminderKey>,
+    checking_reminders: bool,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -86,6 +99,8 @@ pub enum Message {
     OpenRepositoryUrl,
     ToggleContextPage(ContextPage),
     UpdateConfig(Config),
+    DisplayTimezoneInput(String),
+    ApplyDisplayTimezone,
     TabSelected(widget::segmented_button::Entity),
     LaunchUrl(String),
     NavigateNextDay,
@@ -108,12 +123,17 @@ pub enum Message {
     EventEditorDescriptionChanged(String),
     EventEditorLocationChanged(String),
     EventEditorAllDayToggled(bool),
+    EventEditorTimezoneChanged(String),
+    EventEditorFloatingToggled(bool),
     EventEditorTaskToggled(bool),
     EventEditorStartYearChanged(usize),
     EventEditorStartMonthChanged(usize),
     EventEditorStartDayChanged(usize),
     EventEditorStartHourChanged(usize),
     EventEditorStartMinuteChanged(usize),
+    EventEditorEndYearChanged(usize),
+    EventEditorEndMonthChanged(usize),
+    EventEditorEndDayChanged(usize),
     EventEditorEndHourChanged(usize),
     EventEditorEndMinuteChanged(usize),
     EventEditorRecurrenceChanged(usize),
@@ -126,13 +146,17 @@ pub enum Message {
     EventEditorRecurrenceCountChanged(usize),
     EventEditorCalendarChanged(usize),
     SaveEvent,
-    EventSaved(std::result::Result<Event, String>),
-    DeleteEvent(EventId, CalendarKey),
+    EventEditorScopeChanged(usize),
+    EventSaved(std::result::Result<(), String>),
+    DeleteEvent(EventId),
     DeleteOccurrence(EventId, OffsetDateTime),
+    DeleteFollowing(EventId, OffsetDateTime),
     EventDeleted(std::result::Result<EventId, String>),
     ImportIcs,
     IcsFileChosen(Option<PathBuf>),
-    IcsImported(std::result::Result<usize, String>),
+    SelectImportCalendar(CalendarId),
+    ConfirmIcsImport,
+    IcsImported(std::result::Result<(usize, usize), String>),
     ExportIcs,
     IcsExported(std::result::Result<PathBuf, String>),
     OpenNewCalendarForm,
@@ -156,7 +180,7 @@ pub enum Message {
     EventEditorCustomReminderEditToggled(bool),
     EventEditorAddCustomReminder,
     CheckReminders,
-    RemindersFired(Vec<(EventId, OffsetDateTime)>),
+    RemindersFired(Vec<ReminderKey>),
 }
 
 /// Create a COSMIC application from the app model
@@ -230,6 +254,8 @@ impl cosmic::Application for AppModel {
                     }
                 })
                 .unwrap_or_default(),
+            display_timezone_input: String::new(),
+            ics_import: IcsImportState::default(),
             calendar: LocalCalendar::default(),
             storage: Arc::new(Mutex::new(LocalStorage::load().unwrap_or_else(|err| {
                 tracing::error!("failed to load local storage: {err}");
@@ -241,6 +267,7 @@ impl cosmic::Application for AppModel {
             calendar_nav_ids: Vec::new(),
             search_query: String::new(),
             fired_reminders: std::collections::HashSet::new(),
+            checking_reminders: false,
         };
 
         // Seed a default calendar on first run.
@@ -267,6 +294,10 @@ impl cosmic::Application for AppModel {
         // Create a startup command that sets the window title.
         let command = app.update_title();
 
+        app.display_timezone_input = app.config.display_timezone.clone();
+        app.refresh_display_timezone();
+        app.calendar.set_today();
+
         (app, command)
     }
 
@@ -279,6 +310,7 @@ impl cosmic::Application for AppModel {
                 vec![
                     menu::Item::Button(fl!("import-ics"), None, MenuAction::ImportIcs),
                     menu::Item::Button(fl!("export-ics"), None, MenuAction::ExportIcs),
+                    menu::Item::Button(fl!("display-timezone"), None, MenuAction::DisplayTimezone),
                     menu::Item::Button(fl!("about"), None, MenuAction::About),
                 ],
             ),
@@ -396,8 +428,9 @@ impl cosmic::Application for AppModel {
         let create_event = widget::row(vec![widget::button::icon(widget::icon::from_name(
             "list-add-symbolic",
         ))
-        .tooltip(fl!("crate-event"))
-        .on_press(Message::AddEvent(OffsetDateTime::now_local().unwrap()))
+        .tooltip(fl!("create-event"))
+        .name(fl!("create-event"))
+        .on_press(Message::AddEvent(self.calendar.current_date))
         .into()])
         .align_y(Vertical::Center)
         .spacing(spacing().space_xxs);
@@ -481,6 +514,25 @@ impl cosmic::Application for AppModel {
                 )
                 .title(fl!("month-day-agenda"))
             }
+            ContextPage::DisplayTimezone => {
+                let value = self.display_timezone_input.trim();
+                let valid = value.is_empty() || value.parse::<chrono_tz::Tz>().is_ok();
+                let mut form = widget::column(Vec::new())
+                    .spacing(spacing().space_s)
+                    .push(widget::text_input(fl!("display-timezone-placeholder"), &self.display_timezone_input)
+                        .on_input(Message::DisplayTimezoneInput));
+                if !valid {
+                    form = form.push(widget::text::body(fl!("invalid-event-timezone")));
+                }
+                form = form.push(widget::button::suggested(fl!("save"))
+                    .on_press_maybe(valid.then_some(Message::ApplyDisplayTimezone)));
+                context_drawer::context_drawer(form, Message::ToggleContextPage(ContextPage::DisplayTimezone))
+                    .title(fl!("display-timezone"))
+            }
+            ContextPage::IcsImport => context_drawer::context_drawer(
+                self.ics_import_view(),
+                Message::ToggleContextPage(ContextPage::IcsImport),
+            ).title(fl!("import-ics")),
             ContextPage::About => context_drawer::context_drawer(
                 self.about(),
                 Message::ToggleContextPage(ContextPage::About),
@@ -524,23 +576,10 @@ impl cosmic::Application for AppModel {
                 Some(Tab::Month) => self.calendar.month_view(&self.storage.lock().unwrap()),
                 Some(tab @ (Tab::Week | Tab::Day)) => {
                     let storage = self.storage.lock().unwrap();
-                    let center = self.calendar.selected_date;
-                    let range = (center - time::Duration::days(60))..(center + time::Duration::days(60));
-                    let events: Vec<Event> = storage
-                        .events_in_range(range)
-                        .into_iter()
-                        .filter(|event| match event.calendar {
-                            CalendarKey::Local(id) => storage
-                                .get_calendar(id)
-                                .is_none_or(|calendar| calendar.visible),
-                            CalendarKey::Remote { .. } => true,
-                        })
-                        .cloned()
-                        .collect();
                     if matches!(tab, Tab::Week) {
-                        self.calendar.week_view(&events).into()
+                        self.calendar.week_view(&storage).into()
                     } else {
-                        self.calendar.day_view(&events).into()
+                        self.calendar.day_view(&storage).into()
                     }
                 }
                 None => widget::text::title1("Welcome")
@@ -635,6 +674,23 @@ impl cosmic::Application for AppModel {
             }
             Message::UpdateConfig(config) => {
                 self.config = config;
+                self.refresh_display_timezone();
+            }
+            Message::DisplayTimezoneInput(value) => self.display_timezone_input = value,
+            Message::ApplyDisplayTimezone => {
+                let value = self.display_timezone_input.trim();
+                if value.is_empty() || value.parse::<chrono_tz::Tz>().is_ok() {
+                    let mut config = self.config.clone();
+                    config.display_timezone = value.to_string();
+                    match cosmic_config::Config::new(Self::APP_ID, Config::VERSION).and_then(|context| config.write_entry(&context)) {
+                        Ok(()) => {
+                            self.config = config;
+                            self.refresh_display_timezone();
+                            self.core.set_show_context(false);
+                        }
+                        Err(err) => tracing::error!("failed to save display time zone: {err}"),
+                    }
+                }
             }
             Message::LaunchUrl(url) => match open::that_detached(&url) {
                 Ok(()) => {}
@@ -646,25 +702,42 @@ impl cosmic::Application for AppModel {
                 tasks.push(cosmic::task::message(Message::OpenEventEditor(None, date)));
             }
             Message::OpenEventEditor(event_id, date) => {
-                let state = match event_id.and_then(|id| self.storage.lock().unwrap().get_event(id).cloned()) {
-                    Some(event) => EventEditorState::from_event(&event, date),
-                    None => {
-                        let calendar = self
-                            .storage
-                            .lock()
-                            .unwrap()
-                            .list_calendars()
-                            .first()
-                            .map(|meta| CalendarKey::Local(meta.id))
-                            .unwrap_or_else(|| CalendarKey::Local(crate::shared::ids::CalendarId::new()));
-                        EventEditorState::new(calendar, date)
+                if self.editing_event.is_some() {
+                    return Task::none();
+                }
+                let state = if let Some(id) = event_id {
+                    let storage = self.storage.lock().unwrap();
+                    let Some(event) = storage.get_event(id) else {
+                        return Task::none();
+                    };
+                    let mut state = EventEditorState::from_event(event, date);
+                    if state.recurring_series {
+                        state.set_recurrence_scope(event, RecurrenceScope::Occurrence);
                     }
+                    state
+                } else {
+                    let calendar = {
+                        let storage = self.storage.lock().unwrap();
+                        storage.list_calendars().into_iter()
+                            .min_by(|a, b| (!a.visible, &a.name, a.id).cmp(&(!b.visible, &b.name, b.id)))
+                            .map(|meta| CalendarKey::Local(meta.id))
+                    };
+                    let Some(calendar) = calendar else {
+                        return cosmic::task::message(Message::OpenNewCalendarForm);
+                    };
+                    let mut state = EventEditorState::new(calendar, date);
+                    state.timezone = self.calendar.display_timezone
+                        .map(|zone| zone.name().to_string())
+                        .unwrap_or_default();
+                    state
                 };
                 self.reminders_model = build_reminders_model(&state.reminders);
                 self.editing_event = Some(state);
             }
             Message::CloseEventEditor => {
-                self.editing_event = None;
+                if !self.editing_event.as_ref().is_some_and(|state| state.writing) {
+                    self.editing_event = None;
+                }
             }
             Message::EventEditorSummaryChanged(value) => {
                 if let Some(state) = self.editing_event.as_mut() {
@@ -681,6 +754,16 @@ impl cosmic::Application for AppModel {
                     state.location = value;
                 }
             }
+            Message::EventEditorFloatingToggled(floating) => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    state.floating = floating;
+                }
+            }
+            Message::EventEditorTimezoneChanged(value) => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    state.timezone = value;
+                }
+            }
             Message::EventEditorAllDayToggled(value) => {
                 if let Some(state) = self.editing_event.as_mut() {
                     state.all_day = value;
@@ -691,36 +774,47 @@ impl cosmic::Application for AppModel {
                     state.is_task = value;
                 }
             }
-            Message::EventEditorStartYearChanged(idx) => {
+            Message::EventEditorStartYearChanged(idx) | Message::EventEditorEndYearChanged(idx) => {
+                let is_start = matches!(message, Message::EventEditorStartYearChanged(_));
                 if let Some(state) = self.editing_event.as_mut() {
+                    let date = if is_start { state.start } else { state.end };
                     let year = EVENT_EDITOR_YEARS[0] + idx as i32;
-                    if let Ok(new_start) = state.start.replace_year(year) {
-                        shift_event_editor_start(state, new_start);
-                    }
-                }
-            }
-            Message::EventEditorStartMonthChanged(idx) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if let Some(month) = event_editor_months().get(idx) {
-                        let day = state
-                            .start
-                            .day()
-                            .min(month.length(state.start.year()));
-                        if let Ok(new_start) = state
-                            .start
-                            .replace_month(*month)
-                            .and_then(|dt| dt.replace_day(day))
-                        {
-                            shift_event_editor_start(state, new_start);
+                    let day = date.day().min(date.month().length(year));
+                    if let Ok(new_date) = date.replace_day(day).and_then(|date| date.replace_year(year)) {
+                        if is_start {
+                            shift_event_editor_start(state, new_date);
+                        } else {
+                            state.end = new_date;
                         }
                     }
                 }
             }
-            Message::EventEditorStartDayChanged(idx) => {
+            Message::EventEditorStartMonthChanged(idx) | Message::EventEditorEndMonthChanged(idx) => {
+                let is_start = matches!(message, Message::EventEditorStartMonthChanged(_));
                 if let Some(state) = self.editing_event.as_mut() {
-                    let day = idx as u8 + 1;
-                    if let Ok(new_start) = state.start.replace_day(day) {
-                        shift_event_editor_start(state, new_start);
+                    let date = if is_start { state.start } else { state.end };
+                    if let Some(&month) = event_editor_months().get(idx) {
+                        let day = date.day().min(month.length(date.year()));
+                        if let Ok(new_date) = date.replace_day(day).and_then(|date| date.replace_month(month)) {
+                            if is_start {
+                                shift_event_editor_start(state, new_date);
+                            } else {
+                                state.end = new_date;
+                            }
+                        }
+                    }
+                }
+            }
+            Message::EventEditorStartDayChanged(idx) | Message::EventEditorEndDayChanged(idx) => {
+                let is_start = matches!(message, Message::EventEditorStartDayChanged(_));
+                if let Some(state) = self.editing_event.as_mut() {
+                    let date = if is_start { state.start } else { state.end };
+                    if let Ok(new_date) = date.replace_day(idx as u8 + 1) {
+                        if is_start {
+                            shift_event_editor_start(state, new_date);
+                        } else {
+                            state.end = new_date;
+                        }
                     }
                 }
             }
@@ -733,8 +827,8 @@ impl cosmic::Application for AppModel {
             }
             Message::EventEditorStartMinuteChanged(idx) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    if let Some(minute) = EVENT_EDITOR_MINUTES.get(idx) {
-                        if let Ok(new_start) = state.start.replace_minute(*minute) {
+                    if idx < EVENT_EDITOR_MINUTES {
+                        if let Ok(new_start) = state.start.replace_minute(idx as u8) {
                             shift_event_editor_start(state, new_start);
                         }
                     }
@@ -749,8 +843,8 @@ impl cosmic::Application for AppModel {
             }
             Message::EventEditorEndMinuteChanged(idx) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    if let Some(minute) = EVENT_EDITOR_MINUTES.get(idx) {
-                        if let Ok(new_end) = state.end.replace_minute(*minute) {
+                    if idx < EVENT_EDITOR_MINUTES {
+                        if let Ok(new_end) = state.end.replace_minute(idx as u8) {
                             state.end = new_end;
                         }
                     }
@@ -834,38 +928,84 @@ impl cosmic::Application for AppModel {
                     }
                 }
             }
+            Message::EventEditorScopeChanged(scope) => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    let storage = self.storage.lock().unwrap();
+                    if let Some(parent) = state.event_id.and_then(|id| storage.get_event(id)) {
+                        if let Some(&scope) = RecurrenceScope::OPTIONS.get(scope) {
+                            state.set_recurrence_scope(parent, scope);
+                        }
+                    }
+                }
+            }
             Message::SaveEvent => {
-                if let Some(state) = self.editing_event.clone() {
+                if let Some(state) = self.editing_event.as_mut()
+                    .filter(|state| !state.writing && state.validation_error().is_none())
+                {
+                    state.writing = true;
+                    state.error = None;
+                    let state = state.clone();
                     let storage = self.storage.clone();
-                    let existing = state.event_id.and_then(|id| storage.lock().unwrap().get_event(id).cloned());
-                    let event = state.build_event(existing.as_ref());
                     tasks.push(Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
                                 let mut storage = storage.lock().unwrap();
-                                storage.create_event(event.clone()).map(|()| event)
+                                let existing = state.event_id.map(|id| {
+                                    storage.get_event(id).ok_or_else(|| "event not found".to_string())
+                                }).transpose()?;
+                                let mut event = state.build_event(existing);
+                                if state.recurrence_scope == RecurrenceScope::Occurrence {
+                                    let parent = existing.ok_or_else(|| "series not found".to_string())?;
+                                    if parent.exdates.contains(&state.occurrence_start)
+                                        || parent.recurrence_cutoff().is_some_and(|end| state.occurrence_start >= end)
+                                    {
+                                        return Err("occurrence was already changed".to_string());
+                                    }
+                                    event.id = EventId::new();
+                                    event.series_id = Some(parent.id);
+                                    event.recurrence_id = Some(state.occurrence_start);
+                                    event.rrule = None;
+                                    event.exdates.clear();
+                                    event.rdates.clear();
+                                    event.predecessor = None;
+                                    event.repeat_before = None;
+                                    event.split_before = None;
+                                } else if state.recurrence_scope == RecurrenceScope::Following {
+                                    let parent = existing.ok_or_else(|| "series not found".to_string())?;
+                                    event.start_following_series(parent, state.occurrence_start)
+                                        .map_err(|err| err.to_string())?;
+                                }
+                                storage.create_event(event).map_err(|err| err.to_string())
                             })
                             .await
                             .map_err(|err| err.to_string())?
-                            .map_err(|err| err.to_string())
                         },
                         |result| cosmic::action::app(Message::EventSaved(result)),
                     ));
                 }
             }
             Message::EventSaved(result) => match result {
-                Ok(_event) => {
+                Ok(()) => {
                     self.editing_event = None;
                 }
-                Err(err) => tracing::error!("failed to save event: {err}"),
+                Err(err) => {
+                    tracing::error!("failed to save event: {err}");
+                    if let Some(state) = self.editing_event.as_mut() {
+                        state.writing = false;
+                        state.error = Some(fl!("event-save-error"));
+                    }
+                }
             },
-            Message::DeleteEvent(id, calendar) => {
+            Message::DeleteEvent(id) => {
+                if !self.begin_event_deletion(id) {
+                    return Task::none();
+                }
                 let storage = self.storage.clone();
                 tasks.push(Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
                             let mut storage = storage.lock().unwrap();
-                            storage.delete_event(&calendar, id).map(|()| id)
+                            storage.delete_event(id).map(|()| id)
                         })
                         .await
                         .map_err(|err| err.to_string())?
@@ -874,7 +1014,11 @@ impl cosmic::Application for AppModel {
                     |result| cosmic::action::app(Message::EventDeleted(result)),
                 ));
             }
-            Message::DeleteOccurrence(id, occurrence_start) => {
+            Message::DeleteOccurrence(id, occurrence_start) | Message::DeleteFollowing(id, occurrence_start) => {
+                if !self.begin_event_deletion(id) {
+                    return Task::none();
+                }
+                let following = matches!(message, Message::DeleteFollowing(..));
                 let storage = self.storage.clone();
                 tasks.push(Task::perform(
                     async move {
@@ -883,7 +1027,11 @@ impl cosmic::Application for AppModel {
                             let Some(mut event) = storage.get_event(id).cloned() else {
                                 return Err("event not found".to_string());
                             };
-                            event.exdates.push(occurrence_start);
+                            if following {
+                                event.repeat_before = Some(event.repeat_before.map_or(occurrence_start, |end| end.min(occurrence_start)));
+                            } else if !event.exdates.contains(&occurrence_start) {
+                                event.exdates.push(occurrence_start);
+                            }
                             event.updated_at = OffsetDateTime::now_utc();
                             event.sequence += 1;
                             storage
@@ -901,8 +1049,18 @@ impl cosmic::Application for AppModel {
                 Ok(_id) => {
                     self.editing_event = None;
                 }
-                Err(err) => tracing::error!("failed to delete event: {err}"),
+                Err(err) => {
+                    tracing::error!("failed to delete event: {err}");
+                    if let Some(state) = self.editing_event.as_mut() {
+                        state.writing = false;
+                        state.error = Some(fl!("event-delete-error"));
+                    }
+                }
             },
+            Message::ImportIcs if self.ics_import.busy => {
+                self.context_page = ContextPage::IcsImport;
+                self.core.set_show_context(true);
+            }
             Message::ImportIcs => {
                 tasks.push(Task::perform(
                     async {
@@ -915,39 +1073,82 @@ impl cosmic::Application for AppModel {
                     |path| cosmic::action::app(Message::IcsFileChosen(path)),
                 ));
             }
-            Message::IcsFileChosen(path) => {
-                if let Some(path) = path {
+            Message::IcsFileChosen(Some(path)) if !self.ics_import.busy => {
+                let storage = self.storage.lock().unwrap();
+                let calendar = storage.list_calendars().into_iter()
+                    .min_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)))
+                    .map(|calendar| calendar.id);
+                self.ics_import = IcsImportState {
+                    path: Some(path),
+                    calendar,
+                    ..IcsImportState::default()
+                };
+                self.context_page = ContextPage::IcsImport;
+                self.core.set_show_context(true);
+            }
+            Message::IcsFileChosen(_) => {}
+            Message::SelectImportCalendar(id) => self.ics_import.calendar = Some(id),
+            Message::ConfirmIcsImport => {
+                if let (Some(path), Some(calendar_id)) = (
+                    self.ics_import.path.take_if(|_| !self.ics_import.busy && self.ics_import.calendar.is_some()),
+                    self.ics_import.calendar,
+                ) {
+                    self.ics_import.busy = true;
                     let storage = self.storage.clone();
                     tasks.push(Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
-                                let mut storage = storage.lock().unwrap();
-                                let calendar = storage
-                                    .list_calendars()
-                                    .first()
-                                    .map(|meta| CalendarKey::Local(meta.id))
-                                    .ok_or_else(|| "no local calendar to import into".to_string())?;
-                                let text = std::fs::read_to_string(&path)
+                                let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+                                let parsed = ics::parse_import(&text, CalendarKey::Local(calendar_id))
                                     .map_err(|err| err.to_string())?;
-                                let events =
-                                    ics::import_ics(&text, calendar).map_err(|err| err.to_string())?;
-                                let count = events.len();
-                                for event in events {
-                                    storage.create_event(event).map_err(|err| err.to_string())?;
+                                let mut storage = storage.lock().unwrap();
+                                if storage.get_calendar(calendar_id).is_none() {
+                                    return Err("destination calendar no longer exists".to_string());
                                 }
-                                Ok(count)
-                            })
-                            .await
-                            .map_err(|err| err.to_string())?
+                                let mut count = 0;
+                                let mut skipped = parsed.skipped;
+                                let mut resolved_series = HashMap::new();
+                                for mut event in parsed.events {
+                                    if let Some(series) = &mut event.series_id {
+                                        if let Some(existing) = resolved_series.get(series) {
+                                            *series = *existing;
+                                        }
+                                    }
+                                    let duplicate = storage.all_events().into_iter().find(|existing| {
+                                        existing.calendar == event.calendar
+                                            && existing.recurrence_id == event.recurrence_id
+                                            && (existing.id == event.id
+                                                || event.ics_uid.as_deref().is_some_and(|uid| {
+                                                    existing.ics_uid.as_deref() == Some(uid)
+                                                        || existing.id.0.to_string() == uid
+                                                }))
+                                    });
+                                    if let Some(duplicate) = duplicate {
+                                        if event.recurrence_id.is_none() {
+                                            resolved_series.insert(event.id, duplicate.id);
+                                        }
+                                        skipped += 1;
+                                        continue;
+                                    }
+                                    if storage.get_event(event.id).is_some() {
+                                        let original = event.id;
+                                        event.id = EventId::new();
+                                        resolved_series.insert(original, event.id);
+                                    }
+                                    storage.create_event(event).map_err(|err| err.to_string())?;
+                                    count += 1;
+                                }
+                                Ok((count, skipped))
+                            }).await.map_err(|err| err.to_string())?
                         },
                         |result| cosmic::action::app(Message::IcsImported(result)),
                     ));
                 }
             }
-            Message::IcsImported(result) => match result {
-                Ok(count) => tracing::info!("imported {count} event(s) from ICS"),
-                Err(err) => tracing::error!("failed to import ICS file: {err}"),
-            },
+            Message::IcsImported(result) => {
+                self.ics_import.busy = false;
+                self.ics_import.result = Some(result);
+            }
             Message::ExportIcs => {
                 let storage = self.storage.clone();
                 tasks.push(Task::perform(
@@ -966,9 +1167,9 @@ impl cosmic::Application for AppModel {
                         tokio::task::spawn_blocking(move || {
                             let storage = storage.lock().unwrap();
                             let events: Vec<Event> =
-                                storage.all_events().into_iter().cloned().collect();
+                                storage.events_for_export().cloned().collect();
                             let calendar = ics::export_events(&events);
-                            std::fs::write(&path, calendar.to_string())
+                            std::fs::write(&path, calendar)
                                 .map(|()| path)
                                 .map_err(|err| err.to_string())
                         })
@@ -1174,15 +1375,19 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::CheckReminders => {
-                if let Ok(now) = OffsetDateTime::now_local() {
-                    self.calendar.current_date = now;
+                self.refresh_display_timezone();
+                if self.checking_reminders {
+                    return Task::none();
                 }
+                self.checking_reminders = true;
+                let oldest = OffsetDateTime::now_utc() - time::Duration::days(1);
+                self.fired_reminders.retain(|(_, occurrence, _)| *occurrence >= oldest);
                 let storage = self.storage.clone();
                 let already_fired = self.fired_reminders.clone();
                 tasks.push(Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            crate::features::event::notifications::check_reminders(&storage, &already_fired)
+                            check_reminders(&storage, &already_fired)
                         })
                         .await
                         .unwrap_or_default()
@@ -1191,6 +1396,7 @@ impl cosmic::Application for AppModel {
                 ));
             }
             Message::RemindersFired(fired) => {
+                self.checking_reminders = false;
                 self.fired_reminders.extend(fired);
             }
             Message::ShowDayAgenda(date) => {
@@ -1314,6 +1520,17 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn begin_event_deletion(&mut self, id: EventId) -> bool {
+        let Some(state) = self.editing_event.as_mut()
+            .filter(|state| !state.writing && state.event_id == Some(id))
+        else {
+            return false;
+        };
+        state.writing = true;
+        state.error = None;
+        true
+    }
+
     fn update_drawer_layout(&mut self) {
         // Below this width the native drawer would squeeze the seven day columns.
         let overlay = self.context_page != ContextPage::DayAgenda
@@ -1326,6 +1543,48 @@ impl AppModel {
 
     fn show_month(&self) -> bool {
         matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month)) && self.search_query.is_empty()
+    }
+
+    fn ics_import_view(&self) -> Element<'_, Message> {
+        if let Some(result) = &self.ics_import.result {
+            return match result {
+                Ok((imported, skipped)) => widget::text::body(fl!("ics-import-result", imported = imported.to_string(), skipped = skipped.to_string())).into(),
+                Err(error) => widget::text::body(fl!("ics-import-error", error = error.as_str())).into(),
+            };
+        }
+        if self.ics_import.busy {
+            return widget::text::body(fl!("ics-import-working")).into();
+        }
+        let storage = self.storage.lock().unwrap();
+        let mut calendars = storage.list_calendars();
+        calendars.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
+        if calendars.is_empty() {
+            return widget::text::body(fl!("ics-import-no-calendar")).into();
+        }
+        let selected = calendars.iter().position(|calendar| Some(calendar.id) == self.ics_import.calendar);
+        let labels = calendars.iter().map(|calendar| calendar.name.clone()).collect::<Vec<_>>();
+        let ids = calendars.iter().map(|calendar| calendar.id).collect::<Vec<_>>();
+        let file = self.ics_import.path.as_deref().and_then(std::path::Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        widget::column(Vec::new())
+            .spacing(spacing().space_s)
+            .push(widget::text::body(file))
+            .push(widget::settings::item(fl!("ics-import-destination"),
+                widget::dropdown(labels, selected, move |index| Message::SelectImportCalendar(ids[index]))))
+            .push(widget::button::suggested(fl!("ics-import-confirm"))
+                .on_press_maybe(selected.map(|_| Message::ConfirmIcsImport)))
+            .into()
+    }
+
+    fn refresh_display_timezone(&mut self) {
+        self.calendar.display_timezone = self.config.display_timezone.parse().ok().or_else(|| {
+            iana_time_zone::get_timezone().ok()?.parse().ok()
+        });
+        self.calendar.current_date = crate::features::calendar::display_time(
+            OffsetDateTime::now_utc(),
+            self.calendar.display_timezone,
+        );
     }
 
     /// The about page for this app.
@@ -1493,11 +1752,14 @@ pub enum ContextPage {
     About,
     CalendarManager,
     DayAgenda,
+    DisplayTimezone,
+    IcsImport,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuAction {
     About,
+    DisplayTimezone,
     ImportIcs,
     ExportIcs,
 }
@@ -1507,6 +1769,7 @@ impl menu::action::MenuAction for MenuAction {
 
     fn message(&self) -> Self::Message {
         match self {
+            MenuAction::DisplayTimezone => Message::ToggleContextPage(ContextPage::DisplayTimezone),
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::ImportIcs => Message::ImportIcs,
             MenuAction::ExportIcs => Message::ExportIcs,

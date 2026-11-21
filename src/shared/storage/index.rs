@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::ops::Range;
 
 use time::OffsetDateTime;
 
 use crate::features::calendar_management::model::CalendarKey;
-use crate::features::event::model::Event;
+use crate::features::event::{model::Event, resolve_series_occurrence};
 use crate::shared::ids::EventId;
 
 /// In-memory index over all loaded [`Event`]s, rebuilt (or loaded from a
@@ -57,19 +56,27 @@ impl EventIndex {
             .collect()
     }
 
-    /// Returns every event that has at least one occurrence within `range`.
-    ///
-    /// Non-recurring events are checked directly; recurring events
-    /// (`rrule.is_some()`) are expanded on demand via [`Event::occurrences`].
-    pub fn events_in_range(&self, range: Range<OffsetDateTime>) -> Vec<&Event> {
-        self.by_id
-            .values()
-            .filter(|event| !event.occurrences(range.clone()).is_empty())
-            .collect()
+    pub fn all_records(&self) -> impl Iterator<Item = &Event> + Clone {
+        self.by_id.values()
     }
 
     pub fn all(&self) -> impl Iterator<Item = &Event> {
-        self.by_id.values()
+        self.all_records().filter(|event| {
+            if event
+                .recurrence_cutoff()
+                .is_some_and(|cutoff| cutoff <= event.first_possible_occurrence())
+            {
+                return false;
+            }
+            let Some((series, occurrence)) = event.series_id.zip(event.recurrence_id) else {
+                return true;
+            };
+            let (series, occurrence) =
+                resolve_series_occurrence(series, occurrence, self.all_records());
+            self.get(series)
+                .and_then(|parent| parent.repeat_before)
+                .is_none_or(|cutoff| occurrence < cutoff)
+        })
     }
 
     /// Case-insensitive substring search over `summary`/`description`/
@@ -83,8 +90,7 @@ impl EventIndex {
         }
 
         let mut results: Vec<&Event> = self
-            .by_id
-            .values()
+            .all()
             .filter(|event| {
                 event.summary.to_lowercase().contains(&query)
                     || event

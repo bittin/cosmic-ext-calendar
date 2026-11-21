@@ -3,7 +3,7 @@ use cosmic::{
     theme::{spacing, Container},
     widget, Element,
 };
-use time::{Date, Duration, Month, OffsetDateTime, Time, UtcOffset, Weekday};
+use time::{Date, Duration, Month, OffsetDateTime, Time, Weekday};
 
 use crate::{
     app::Message,
@@ -15,20 +15,22 @@ use crate::{
     shared::{ids::EventId, storage::LocalStorage},
 };
 
-use super::LocalCalendar;
+use super::{display_time, LocalCalendar};
 
 const DAYS_PER_WEEK: usize = 7;
 const EVENT_ROWS: usize = 2;
 const EVENT_HEIGHT: f32 = 20.0;
 const COMPACT_WIDTH: f32 = 520.0;
 
-struct Occurrence {
+pub(super) struct Occurrence {
     id: EventId,
-    start: OffsetDateTime,
-    first: Date,
-    last: Date,
-    time: Option<String>,
-    title: String,
+    pub(super) display_start: OffsetDateTime,
+    pub(super) display_end: OffsetDateTime,
+    pub(super) start: OffsetDateTime,
+    pub(super) first: Date,
+    pub(super) last: Date,
+    pub(super) time: Option<String>,
+    pub(super) title: String,
     calendar: Option<String>,
     color: Option<Color>,
 }
@@ -38,12 +40,17 @@ impl Occurrence {
         self.first != self.last
     }
 
-    fn open(&self) -> Message {
+    pub(super) fn open(&self) -> Message {
         Message::OpenEventEditor(Some(self.id), self.start)
     }
 }
 
-fn occurrences(storage: &LocalStorage, first: Date, last: Date) -> Vec<Occurrence> {
+pub(super) fn occurrences(
+    storage: &LocalStorage,
+    first: Date,
+    last: Date,
+    zone: Option<chrono_tz::Tz>,
+) -> Vec<Occurrence> {
     occurrences_with_calendars(
         storage.all_events().into_iter().map(|event| {
             let calendar = match event.calendar {
@@ -54,6 +61,7 @@ fn occurrences(storage: &LocalStorage, first: Date, last: Date) -> Vec<Occurrenc
         }),
         first,
         last,
+        zone,
     )
 }
 
@@ -61,6 +69,7 @@ fn occurrences_with_calendars<'a>(
     events: impl IntoIterator<Item = (&'a Event, Option<&'a LocalCalendarMeta>)>,
     first: Date,
     last: Date,
+    zone: Option<chrono_tz::Tz>,
 ) -> Vec<Occurrence> {
     let utc_midnight = |date: Date| date.midnight().assume_utc();
     let mut items = Vec::new();
@@ -83,7 +92,11 @@ fn occurrences_with_calendars<'a>(
         let upper = utc_midnight(last).saturating_add(Duration::days(2));
 
         for start in event.occurrences(lower..upper) {
-            let display_start = if all_day { start } else { local_time(start) };
+            let display_start = if all_day || event.floating {
+                start
+            } else {
+                display_time(start, zone)
+            };
             let inclusive_end = if duration.is_zero() {
                 start
             } else {
@@ -91,10 +104,10 @@ fn occurrences_with_calendars<'a>(
                     .saturating_add(duration)
                     .saturating_sub(Duration::NANOSECOND)
             };
-            let display_end = if all_day {
+            let display_end = if all_day || event.floating {
                 inclusive_end
             } else {
-                local_time(inclusive_end)
+                display_time(inclusive_end, zone)
             };
             if display_start.date() > last || display_end.date() < first {
                 continue;
@@ -103,6 +116,8 @@ fn occurrences_with_calendars<'a>(
             items.push(Occurrence {
                 id: event.id,
                 start,
+                display_start,
+                display_end,
                 first: display_start.date(),
                 last: display_end.date(),
                 time: (!all_day)
@@ -123,21 +138,6 @@ fn occurrences_with_calendars<'a>(
             .cmp(&(b.first, &b.time, b.start, &b.title, b.id))
     });
     items
-}
-
-fn local_time(date: OffsetDateTime) -> OffsetDateTime {
-    use chrono::Offset;
-    chrono::DateTime::from_timestamp(date.unix_timestamp(), date.nanosecond())
-        .and_then(|utc| {
-            let offset = utc
-                .with_timezone(&chrono::Local)
-                .offset()
-                .fix()
-                .local_minus_utc();
-            UtcOffset::from_whole_seconds(offset).ok()
-        })
-        .and_then(|offset| date.checked_to_offset(offset))
-        .unwrap_or(date)
 }
 
 fn calendar_color(value: &str) -> Option<Color> {
@@ -165,7 +165,7 @@ pub(super) fn month_view<'a>(
     let weeks =
         (leading + usize::from(selected.month().length(selected.year()))).div_ceil(DAYS_PER_WEEK);
     let last = first + Duration::days((weeks * DAYS_PER_WEEK - 1) as i64);
-    let items = occurrences(storage, first, last);
+    let items = occurrences(storage, first, last, calendar.display_timezone);
 
     widget::responsive(move |size| {
         let compact = size.width < COMPACT_WIDTH;
@@ -174,7 +174,7 @@ pub(super) fn month_view<'a>(
         let date = calendar
             .selected_date
             .replace_time(Time::from_hms(9, 0, 0).unwrap());
-        let date = date.replace_offset(local_time(date).offset());
+        let date = date.replace_offset(display_time(date, calendar.display_timezone).offset());
         let header = widget::row(vec![
             widget::text::title3(month_title(selected)).into(),
             widget::space::horizontal().into(),
@@ -541,8 +541,12 @@ pub(crate) fn day_id(date: Date) -> Id {
     Id::new(format!("month-day-{date}"))
 }
 
-pub(super) fn agenda<'a>(date: Date, storage: &LocalStorage) -> Element<'a, Message> {
-    let items = occurrences(storage, date, date);
+pub(super) fn agenda<'a>(
+    date: Date,
+    storage: &LocalStorage,
+    zone: Option<chrono_tz::Tz>,
+) -> Element<'a, Message> {
+    let items = occurrences(storage, date, date, zone);
     let mut content = widget::column(Vec::new())
         .spacing(spacing().space_xxs)
         .push(widget::text::heading(agenda_date(date)));
@@ -555,6 +559,7 @@ pub(super) fn agenda<'a>(date: Date, storage: &LocalStorage) -> Element<'a, Mess
                 Some(calendar) => format!("{time} · {calendar}"),
                 None => time,
             };
+            let accessible_label = format!("{} · {metadata}", event.title);
             let row = widget::column(Vec::new())
                 .push(widget::text::body(event.title.clone()))
                 .push(widget::text::caption(metadata))
@@ -567,7 +572,8 @@ pub(super) fn agenda<'a>(date: Date, storage: &LocalStorage) -> Element<'a, Mess
                 widget::button::custom(entry)
                     .width(Length::Fill)
                     .padding(spacing().space_xs)
-                    .class(cosmic::style::Button::ListItem([6.0; 4]))
+                    .class(cosmic::style::Button::Text)
+                    .name(accessible_label)
                     .on_press(event.open()),
             );
         }
@@ -591,7 +597,7 @@ fn month_title(date: Date) -> String {
     )
 }
 
-fn agenda_date(date: Date) -> String {
+pub(super) fn agenda_date(date: Date) -> String {
     fl!(
         "month-agenda-date",
         weekday = weekday_name(date.weekday()),
@@ -600,7 +606,7 @@ fn agenda_date(date: Date) -> String {
     )
 }
 
-fn weekday_name(day: Weekday) -> String {
+pub(super) fn weekday_name(day: Weekday) -> String {
     match day {
         Weekday::Monday => fl!("weekday-mon"),
         Weekday::Tuesday => fl!("weekday-tue"),
@@ -653,16 +659,20 @@ mod tests {
         .build_event(None);
         event.time = EventTime::AllDay { start, end: last };
 
-        let items = occurrences_with_calendars([(&event, Some(&calendar))], first, last);
+        let items = occurrences_with_calendars([(&event, Some(&calendar))], first, last, None);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].first, start);
         assert_eq!(items[0].last, first);
         assert_eq!(items[0].time, None);
         assert_eq!(items[0].color, Some(Color::from_rgb8(60, 170, 134)));
-        assert!(occurrences_with_calendars([(&event, Some(&calendar))], last, last).is_empty());
+        assert!(
+            occurrences_with_calendars([(&event, Some(&calendar))], last, last, None).is_empty()
+        );
 
         calendar.visible = false;
-        assert!(occurrences_with_calendars([(&event, Some(&calendar))], first, first).is_empty());
+        assert!(
+            occurrences_with_calendars([(&event, Some(&calendar))], first, first, None).is_empty()
+        );
     }
 
     #[test]

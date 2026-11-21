@@ -84,17 +84,36 @@ pub struct Event {
     pub description: Option<String>,
     pub location: Option<String>,
     pub time: EventTime,
-    /// IANA timezone name; `None` means floating/local time.
+    /// IANA time zone used to expand wall-clock recurrence.
     pub timezone: Option<String>,
+    /// A floating time stores its wall-clock fields at UTC for arithmetic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub floating: bool,
     /// Per-event override of the calendar's color.
     pub color: Option<String>,
     /// RFC 5545 RRULE string, expanded on demand via `crate::features::event::occurrences`.
     pub rrule: Option<String>,
+    /// Exclusive boundary for a series shortened by deleting future occurrences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_before: Option<OffsetDateTime>,
+    /// This series replaces the predecessor from its original occurrence onward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<(EventId, OffsetDateTime)>,
+    /// Derived from successor records when the store loads.
+    #[serde(skip)]
+    pub split_before: Option<OffsetDateTime>,
     /// RFC 5545 EXDATE: occurrences of `rrule` to exclude.
     pub exdates: Vec<OffsetDateTime>,
+    /// Dates explicitly added to the recurrence set by iCalendar RDATE.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rdates: Vec<OffsetDateTime>,
     /// Set when this `Event` is a modified single occurrence of a recurring
     /// parent (RFC 5545 RECURRENCE-ID).
     pub recurrence_id: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ics_uid: Option<String>,
     pub attendees: Vec<Attendee>,
     pub reminders: Vec<Reminder>,
     pub source: Source,

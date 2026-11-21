@@ -1,51 +1,122 @@
-use crate::features::event::model::Event;
-use crate::shared::{ids::EventId, storage::LocalStorage};
+use crate::shared::storage::LocalStorage;
 use crate::Result;
+use chrono::Offset;
 use cosmic::{
-    iced::Length,
+    iced::{widget::text::Wrapping, Length},
     theme::spacing,
     widget, Element,
 };
-use std::ops::Range;
-use time::{Month, OffsetDateTime, Weekday};
+use time::{Date, Duration, Month, OffsetDateTime, Time, UtcOffset};
 
 mod day;
 pub(crate) mod month;
 mod week;
 
-/// A single occurrence of an [`Event`] to render on a grid: owns its own
-/// data so recurring events can appear more than once (once per occurrence)
-/// without juggling per-occurrence borrows against the source `Event`.
-#[derive(Debug, Clone)]
-pub(crate) struct EventChip {
-    pub id: EventId,
-    pub summary: String,
-    /// The start of this specific occurrence (may differ from the parent
-    /// event's own stored start for recurring events).
-    pub start: OffsetDateTime,
+pub(crate) fn display_time(date: OffsetDateTime, zone: Option<chrono_tz::Tz>) -> OffsetDateTime {
+    let Some(utc) = chrono::DateTime::from_timestamp(date.unix_timestamp(), date.nanosecond())
+    else {
+        return date;
+    };
+    let offset = match zone {
+        Some(zone) => utc.with_timezone(&zone).offset().fix(),
+        None => *utc.with_timezone(&chrono::Local).offset(),
+    };
+    UtcOffset::from_whole_seconds(offset.local_minus_utc())
+        .ok()
+        .and_then(|offset| date.checked_to_offset(offset))
+        .unwrap_or(date)
 }
 
-/// Expands `events` into one [`EventChip`] per occurrence that falls within
-/// `range`, using [`Event::occurrences`] (a no-op expansion for
-/// non-recurring events).
-fn expand_occurrences(events: &[Event], range: Range<OffsetDateTime>) -> Vec<EventChip> {
-    let mut chips = Vec::new();
-    for event in events {
-        for start in event.occurrences(range.clone()) {
-            chips.push(EventChip {
-                id: event.id,
-                summary: event.summary.clone(),
-                start,
-            });
-        }
+use month::Occurrence;
+
+fn all_day_cell(date: Date, items: &[Occurrence]) -> Element<'static, crate::app::Message> {
+    let mut column = widget::column(Vec::new())
+        .width(Length::Fill)
+        .spacing(spacing().space_xxxs);
+    for item in items
+        .iter()
+        .filter(|item| item.time.is_none() && item.first <= date && date <= item.last)
+    {
+        column = column.push(
+            widget::button::custom(
+                widget::container(
+                    widget::text::caption(item.title.clone()).wrapping(Wrapping::None),
+                )
+                .width(Length::Fill)
+                .clip(true),
+            )
+            .width(Length::Fill)
+            .padding([4, 6])
+            .class(cosmic::style::Button::Text)
+            .name(item.title.clone())
+            .on_press(item.open()),
+        );
     }
-    chips
+    column.into()
+}
+
+fn time_slot(
+    date: OffsetDateTime,
+    hour: u8,
+    half_hour: bool,
+    items: &[Occurrence],
+) -> Element<'static, crate::app::Message> {
+    let minute = if half_hour { 30 } else { 0 };
+    let cell_time = date.replace_time(Time::from_hms(hour, minute, 0).unwrap());
+    let start = cell_time.time();
+    let end = cell_time
+        .checked_add(Duration::minutes(30))
+        .filter(|end| end.date() == date.date())
+        .map(|end| end.time());
+    let mut events = items
+        .iter()
+        .filter(|item| {
+            item.time.is_some()
+                && item.first <= date.date()
+                && date.date() <= item.last
+                && (item.first != date.date()
+                    || end.is_none_or(|end| item.display_start.time() < end))
+                && (item.last != date.date() || item.display_end.time() >= start)
+        })
+        .peekable();
+    if events.peek().is_none() {
+        return widget::button::custom(widget::text(""))
+            .name(crate::fl!(
+                "calendar-add-at",
+                date = month::agenda_date(date.date()),
+                time = format!("{hour:02}:{minute:02}")
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .class(cosmic::style::Button::Text)
+            .on_press(crate::app::Message::AddEvent(cell_time))
+            .into();
+    }
+    events
+        .fold(widget::row(Vec::new()).width(Length::Fill), |row, item| {
+            row.push(
+                widget::button::custom(
+                    widget::container(
+                        widget::text::caption(item.title.clone()).wrapping(Wrapping::None),
+                    )
+                    .clip(true)
+                    .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .class(cosmic::style::Button::Standard)
+                .name(item.title.clone())
+                .on_press(item.open()),
+            )
+        })
+        .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalCalendar {
     pub current_date: OffsetDateTime,
     pub selected_date: OffsetDateTime,
+    pub display_timezone: Option<chrono_tz::Tz>,
 }
 
 impl Default for LocalCalendar {
@@ -60,6 +131,7 @@ impl Default for LocalCalendar {
         Self {
             current_date,
             selected_date: current_date,
+            display_timezone: None,
         }
     }
 }
@@ -70,6 +142,7 @@ impl LocalCalendar {
         Self {
             current_date,
             selected_date: current_date,
+            display_timezone: None,
         }
     }
 
@@ -78,51 +151,46 @@ impl LocalCalendar {
     }
 
     pub fn day_agenda<'a>(&self, storage: &LocalStorage) -> Element<'a, crate::app::Message> {
-        month::agenda(self.selected_date.date(), storage)
+        month::agenda(self.selected_date.date(), storage, self.display_timezone)
     }
 
     pub fn week_view<'a>(
         &'a self,
-        events: &[Event],
+        storage: &LocalStorage,
     ) -> impl Into<Element<'a, crate::app::Message>> {
         let selected_date = self.selected_date;
-        let days_since_sunday = match selected_date.weekday() {
-            Weekday::Sunday => 0,
-            Weekday::Monday => 1,
-            Weekday::Tuesday => 2,
-            Weekday::Wednesday => 3,
-            Weekday::Thursday => 4,
-            Weekday::Friday => 5,
-            Weekday::Saturday => 6,
-        };
-
+        let days_since_monday = i64::from(selected_date.weekday().number_days_from_monday());
         let week_start = selected_date
-            .checked_sub(time::Duration::days(days_since_sunday as i64))
-            .unwrap();
+            .replace_time(Time::MIDNIGHT)
+            .saturating_sub(Duration::days(days_since_monday));
 
-        let mut header_row = widget::row(Vec::new()).padding([0, spacing().space_xs, 0, 0]);
-
-        let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        for i in -1..7 {
-            if i == -1 {
-                header_row = header_row.push(week::empty_day_header());
-                continue;
-            }
-
-            let day_date = week_start.checked_add(time::Duration::days(i)).unwrap();
-            let is_today = day_date.date() == self.current_date.date();
-
-            let day_header =
-                week::day_header(day_names[i as usize], day_date.day(), is_today, day_date);
-            header_row = header_row.push(day_header);
+        let mut header_row =
+            widget::row(Vec::new()).push(widget::Space::new().width(week::TIME_COLUMN_WIDTH));
+        for day in 0..7 {
+            let date = week_start + Duration::days(day);
+            header_row = header_row.push(week::day_header(
+                month::weekday_name(date.weekday()),
+                date.day(),
+                date.date() == self.current_date.date(),
+                date,
+            ));
         }
 
-        let range = week_start..(week_start + time::Duration::days(7));
-        let chips = expand_occurrences(events, range);
-        let time_grid = week::week_grid(&week_start, &chips);
+        let first = week_start.date();
+        let last = first + Duration::days(6);
+        let items = month::occurrences(storage, first, last, self.display_timezone);
+        let time_grid = week::week_grid(&week_start, &items);
+        let all_day = (0..7).fold(
+            widget::row(Vec::new()).push(
+                widget::container(widget::text::caption(crate::fl!("all-day")))
+                    .width(week::TIME_COLUMN_WIDTH),
+            ),
+            |row, day| row.push(all_day_cell(first + Duration::days(day), &items)),
+        );
 
         widget::column(Vec::new())
             .push(header_row)
+            .push(all_day)
             .push(
                 widget::scrollable(time_grid)
                     .height(Length::Fill)
@@ -133,14 +201,17 @@ impl LocalCalendar {
 
     pub fn day_view<'a>(
         &'a self,
-        events: &[Event],
+        storage: &LocalStorage,
     ) -> impl Into<Element<'a, crate::app::Message>> {
-        let day_start = self.selected_date.replace_time(time::Time::MIDNIGHT);
-        let range = day_start..(day_start + time::Duration::days(1));
-        let chips = expand_occurrences(events, range);
-        let time_grid = day::single_day_time_grid(&self.selected_date, &chips);
+        let date = self.selected_date.date();
+        let items = month::occurrences(storage, date, date, self.display_timezone);
+        let time_grid = day::single_day_time_grid(&self.selected_date, &items);
+        let all_day = widget::row(Vec::new())
+            .push(widget::text::caption(crate::fl!("all-day")).width(100))
+            .push(all_day_cell(date, &items));
 
         widget::column(Vec::new())
+            .push(all_day)
             .push(widget::scrollable(time_grid).height(Length::Fill))
             .padding([0, 0, spacing().space_xxs, 0])
     }

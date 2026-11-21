@@ -34,6 +34,16 @@ It is recommended to build a source tarball with the vendored dependencies, whic
 
 Developers should install [rustup][rustup] and configure their editor to use [rust-analyzer][rust-analyzer]. To improve compilation times, disable LTO in the release profile, install the [mold][mold] linker, and configure [sccache][sccache] for use with Rust. The [mold][mold] linker will only improve link times if LTO is disabled.
 
+The Linux CI build uses Rust 1.99.0 and Ubuntu 24.04. On Ubuntu, install
+`pkg-config`, `libudev-dev`, `libwayland-dev`, and `libxkbcommon-dev`.
+Use the committed lockfile for repeatable checks:
+
+```sh
+cargo test --locked
+cargo clippy --locked --all-targets
+cargo build --locked
+```
+
 [fluent]: https://projectfluent.org/
 [fluent-guide]: https://projectfluent.org/fluent/guide/hello.html
 [iso-codes]: https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes

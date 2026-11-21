@@ -4,17 +4,22 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <name>Cosmic Ext Calendar</name>
-  <summary>A calendar application for the COSMIC desktop</summary>
+  <summary>Plan events on the COSMIC desktop</summary>
+  <description>
+    <p>Organize events in local calendars and view your schedule by month, week, or day.</p>
+    <p>Create recurring and all-day events, add desktop reminders, and exchange calendars using iCalendar files.</p>
+  </description>
+  <developer id="dev.edfloreshz">
+    <name>COSMIC Utils</name>
+  </developer>
   <icon type="remote" width="64" height="64" scale="1">
     https://github.com/cosmic-utils/calendar/raw/main/resources/icons/hicolor/scalable/apps/icon.svg
   </icon>
+  <url type="homepage">https://github.com/cosmic-utils/calendar</url>
   <url type="vcs-browser">https://github.com/cosmic-utils/calendar</url>
   <launchable type="desktop-id">dev.edfloreshz.Calendar.desktop</launchable>
   <provides>
-    <id>dev.edfloreshz.Calendar</id>
-    <binaries>
-      <binary>cosmic-ext-calendar</binary>
-    </binaries>
+    <binary>cosmic-ext-calendar</binary>
   </provides>
   <requires>
     <display_length compare="ge">360</display_length>
@@ -25,6 +30,8 @@
     <control>touch</control>
   </supports>
   <categories>
+    <category>Office</category>
+    <category>Calendar</category>
     <category>COSMIC</category>
   </categories>
   <keywords>
