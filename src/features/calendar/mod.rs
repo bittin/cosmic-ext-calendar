@@ -1,18 +1,16 @@
-use crate::features::calendar_management::model::CalendarKey;
 use crate::features::event::model::Event;
-use crate::shared::ids::EventId;
+use crate::shared::{ids::EventId, storage::LocalStorage};
 use crate::Result;
 use cosmic::{
-    iced::{alignment::Horizontal, Length},
+    iced::Length,
     theme::spacing,
     widget, Element,
 };
-use std::collections::BTreeMap;
 use std::ops::Range;
 use time::{Month, OffsetDateTime, Weekday};
 
 mod day;
-mod month;
+pub(crate) mod month;
 mod week;
 
 /// A single occurrence of an [`Event`] to render on a grid: owns its own
@@ -21,7 +19,6 @@ mod week;
 #[derive(Debug, Clone)]
 pub(crate) struct EventChip {
     pub id: EventId,
-    pub calendar: CalendarKey,
     pub summary: String,
     /// The start of this specific occurrence (may differ from the parent
     /// event's own stored start for recurring events).
@@ -37,22 +34,12 @@ fn expand_occurrences(events: &[Event], range: Range<OffsetDateTime>) -> Vec<Eve
         for start in event.occurrences(range.clone()) {
             chips.push(EventChip {
                 id: event.id,
-                calendar: event.calendar.clone(),
                 summary: event.summary.clone(),
                 start,
             });
         }
     }
     chips
-}
-
-/// Buckets `chips` by the calendar date they occur on, for the month grid.
-fn chips_by_day(chips: Vec<EventChip>) -> BTreeMap<time::Date, Vec<EventChip>> {
-    let mut map: BTreeMap<time::Date, Vec<EventChip>> = BTreeMap::new();
-    for chip in chips {
-        map.entry(chip.start.date()).or_default().push(chip);
-    }
-    map
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,36 +73,12 @@ impl LocalCalendar {
         }
     }
 
-    pub fn month_view<'a>(
-        &'a self,
-        events: &[Event],
-    ) -> impl Into<Element<'a, crate::app::Message>> {
-        let weekday_headers = widget::row::with_children(vec![
-            month::weekday_header("Sun"),
-            month::weekday_header("Mon"),
-            month::weekday_header("Tue"),
-            month::weekday_header("Wed"),
-            month::weekday_header("Thu"),
-            month::weekday_header("Fri"),
-            month::weekday_header("Sat"),
-        ])
-        .spacing(spacing().space_xxs);
+    pub fn month_view<'a>(&self, storage: &LocalStorage) -> Element<'a, crate::app::Message> {
+        month::month_view(*self, storage)
+    }
 
-        // The grid always displays 6 weeks (42 days); pad generously on
-        // both ends so occurrences from the leading/trailing prior/next
-        // month days are included too.
-        let range_start = self.selected_date.replace_day(1).unwrap() - time::Duration::days(7);
-        let range_end = range_start + time::Duration::days(49);
-        let chips = chips_by_day(expand_occurrences(events, range_start..range_end));
-        let calendar_grid = month::month_grid(&self.selected_date, &self.current_date, &chips);
-
-        widget::column(Vec::new())
-            .push(weekday_headers)
-            .push(calendar_grid)
-            .spacing(spacing().space_xs)
-            .align_x(Horizontal::Center)
-            .height(Length::Fill)
-            .padding([0, 0, spacing().space_xxs, 0])
+    pub fn day_agenda<'a>(&self, storage: &LocalStorage) -> Element<'a, crate::app::Message> {
+        month::agenda(self.selected_date.date(), storage)
     }
 
     pub fn week_view<'a>(
@@ -207,16 +170,22 @@ impl LocalCalendar {
     }
 
     pub fn next_month(&mut self) -> Result<()> {
-        let next_month = self.selected_date.month().next();
-        let new_date = self.selected_date.replace_month(next_month)?;
-        self.selected_date = new_date;
-        Ok(())
+        self.shift_month(1)
     }
 
     pub fn previous_month(&mut self) -> Result<()> {
-        let previous_month = self.selected_date.month().previous();
-        let new_date = self.selected_date.replace_month(previous_month)?;
-        self.selected_date = new_date;
+        self.shift_month(-1)
+    }
+
+    fn shift_month(&mut self, delta: i32) -> Result<()> {
+        let date = self.selected_date.date();
+        let month_index = i32::from(u8::from(date.month())) - 1 + delta;
+        let year = date.year() + month_index.div_euclid(12);
+        let month = Month::try_from((month_index.rem_euclid(12) + 1) as u8)?;
+        let day = date.day().min(month.length(year));
+        self.selected_date = self
+            .selected_date
+            .replace_date(time::Date::from_calendar_date(year, month, day)?);
         Ok(())
     }
 
@@ -235,7 +204,7 @@ impl LocalCalendar {
     }
 
     pub fn today(&self) -> bool {
-        self.selected_date == self.current_date
+        self.selected_date.date() == self.current_date.date()
     }
 
     pub fn set_date(&mut self, date: OffsetDateTime) {

@@ -53,3 +53,34 @@ reminders-caption = Notify before the event starts. Select any number of reminde
 reminder-at-start = At start
 custom-reminder-placeholder = Custom reminder (minutes before)
 
+previous-month = Previous month
+next-month = Next month
+month-heading = { $month } { $year }
+month-day-agenda = Day agenda
+month-agenda-date = { $weekday }, { $month } { $day }
+month-no-events = No events
+month-more-events = +{ $count } more
+month-day-accessible =
+    { $count ->
+        [one] { $date }, one event
+       *[other] { $date }, { $count } events
+    }
+weekday-mon = Mon
+weekday-tue = Tue
+weekday-wed = Wed
+weekday-thu = Thu
+weekday-fri = Fri
+weekday-sat = Sat
+weekday-sun = Sun
+month-jan = January
+month-feb = February
+month-mar = March
+month-apr = April
+month-may = May
+month-jun = June
+month-jul = July
+month-aug = August
+month-sep = September
+month-oct = October
+month-nov = November
+month-dec = December

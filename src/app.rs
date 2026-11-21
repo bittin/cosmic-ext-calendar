@@ -45,6 +45,8 @@ pub struct AppModel {
     core: cosmic::Core,
     /// Display a context drawer with the designated page if defined.
     context_page: ContextPage,
+    /// Main window width reported by COSMIC.
+    window_width: f32,
     /// Contains items assigned to the nav bar panel.
     nav: nav_bar::Model,
     /// Contains items assigned to the tab bar.
@@ -95,6 +97,8 @@ pub enum Message {
     NavigateToday,
     AddEvent(OffsetDateTime),
     SelectDate(OffsetDateTime),
+    ShowDayAgenda(time::Date),
+    CloseDayAgenda,
     SelectMonth(usize),
     SelectYear(usize),
     SelectDay(usize),
@@ -209,6 +213,7 @@ impl cosmic::Application for AppModel {
         let mut app = AppModel {
             core,
             context_page: ContextPage::default(),
+            window_width: 0.0,
             nav,
             tabs,
             key_binds: HashMap::new(),
@@ -283,6 +288,10 @@ impl cosmic::Application for AppModel {
     }
 
     fn header_center<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
+        if self.show_month() {
+            return Vec::new();
+        }
+
         vec![widget::text(format!(
             "{} {}",
             self.calendar.selected_date.month(),
@@ -292,14 +301,25 @@ impl cosmic::Application for AppModel {
     }
 
     fn header_end<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
+        let width = if self.window_width > 0.0
+            && matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month))
+        {
+            (self.window_width / self.core.scale_factor() - 260.0).clamp(120.0, 240.0)
+        } else {
+            240.0
+        };
         vec![widget::search_input(fl!("search"), &self.search_query)
             .on_input(Message::SearchChanged)
             .on_clear(Message::SearchChanged(String::new()))
-            .width(Length::Fixed(240.0))
+            .width(Length::Fixed(width))
             .into()]
     }
 
     fn footer<'a>(&'a self) -> Option<Element<'a, Self::Message>> {
+        if self.show_month() {
+            return None;
+        }
+
         let today = widget::button::icon(widget::icon::from_name("calendar-go-today-symbolic"))
             .tooltip(fl!("today"))
             .class(cosmic::style::Button::NavToggle)
@@ -453,6 +473,14 @@ impl cosmic::Application for AppModel {
         }
 
         Some(match self.context_page {
+            ContextPage::DayAgenda => {
+                let storage = self.storage.lock().unwrap();
+                context_drawer::context_drawer(
+                    self.calendar.day_agenda(&storage),
+                    Message::CloseDayAgenda,
+                )
+                .title(fl!("month-day-agenda"))
+            }
             ContextPage::About => context_drawer::context_drawer(
                 self.about(),
                 Message::ToggleContextPage(ContextPage::About),
@@ -489,36 +517,32 @@ impl cosmic::Application for AppModel {
             .on_activate(Message::TabSelected)
             .into();
 
-        let events: Vec<Event> = {
-            let storage = self.storage.lock().unwrap();
-            let center = self.calendar.selected_date;
-            let range = (center - time::Duration::days(60))..(center + time::Duration::days(60));
-            let hidden: std::collections::HashSet<crate::shared::ids::CalendarId> = storage
-                .list_calendars()
-                .into_iter()
-                .filter(|meta| !meta.visible)
-                .map(|meta| meta.id)
-                .collect();
-            storage
-                .events_in_range(range)
-                .into_iter()
-                .filter(|event| match &event.calendar {
-                    CalendarKey::Local(id) => !hidden.contains(id),
-                    CalendarKey::Remote { .. } => true,
-                })
-                .cloned()
-                .collect()
-        };
-
         let active_tab = if !self.search_query.is_empty() {
             self.search_results_view()
         } else {
             match self.tabs.active_data::<Tab>() {
-                Some(active_tab) => match active_tab {
-                    Tab::Month => self.calendar.month_view(&events).into(),
-                    Tab::Week => self.calendar.week_view(&events).into(),
-                    Tab::Day => self.calendar.day_view(&events).into(),
-                },
+                Some(Tab::Month) => self.calendar.month_view(&self.storage.lock().unwrap()),
+                Some(tab @ (Tab::Week | Tab::Day)) => {
+                    let storage = self.storage.lock().unwrap();
+                    let center = self.calendar.selected_date;
+                    let range = (center - time::Duration::days(60))..(center + time::Duration::days(60));
+                    let events: Vec<Event> = storage
+                        .events_in_range(range)
+                        .into_iter()
+                        .filter(|event| match event.calendar {
+                            CalendarKey::Local(id) => storage
+                                .get_calendar(id)
+                                .is_none_or(|calendar| calendar.visible),
+                            CalendarKey::Remote { .. } => true,
+                        })
+                        .cloned()
+                        .collect();
+                    if matches!(tab, Tab::Week) {
+                        self.calendar.week_view(&events).into()
+                    } else {
+                        self.calendar.day_view(&events).into()
+                    }
+                }
                 None => widget::text::title1("Welcome")
                     .apply(widget::container)
                     .width(Length::Fill)
@@ -548,7 +572,37 @@ impl cosmic::Application for AppModel {
             .watch_config::<Config>(Self::APP_ID)
             .map(|update| Message::UpdateConfig(update.config));
 
-        Subscription::batch([reminders_tick, config_updates])
+        let month_shortcuts = if self.show_month() && self.editing_event.is_none() {
+            cosmic::iced::event::listen_with(|event, status, _| {
+                use cosmic::iced::{
+                    event,
+                    keyboard::{self, key::Named},
+                    Event,
+                };
+
+                let Event::Keyboard(keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    repeat: false,
+                    ..
+                }) = event
+                else {
+                    return None;
+                };
+                if status != event::Status::Ignored || modifiers != keyboard::Modifiers::CTRL {
+                    return None;
+                }
+                match key.as_ref() {
+                    keyboard::Key::Named(Named::PageUp) => Some(Message::NavigatePreviousMonth),
+                    keyboard::Key::Named(Named::PageDown) => Some(Message::NavigateNextMonth),
+                    keyboard::Key::Named(Named::Home) => Some(Message::NavigateToday),
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([reminders_tick, config_updates, month_shortcuts])
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -560,6 +614,11 @@ impl cosmic::Application for AppModel {
         match message {
             Message::TabSelected(tab) => {
                 self.tabs.activate(tab);
+                if self.context_page == ContextPage::DayAgenda
+                    && !matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month))
+                {
+                    self.core.set_show_context(false);
+                }
             }
             Message::OpenRepositoryUrl => {
                 _ = open::that_detached(REPOSITORY);
@@ -1061,6 +1120,9 @@ impl cosmic::Application for AppModel {
             },
             Message::SearchChanged(query) => {
                 self.search_query = query;
+                if self.context_page == ContextPage::DayAgenda && !self.search_query.is_empty() {
+                    self.core.set_show_context(false);
+                }
             }
             Message::SelectSearchResult(id, start) => {
                 self.search_query.clear();
@@ -1112,6 +1174,9 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::CheckReminders => {
+                if let Ok(now) = OffsetDateTime::now_local() {
+                    self.calendar.current_date = now;
+                }
                 let storage = self.storage.clone();
                 let already_fired = self.fired_reminders.clone();
                 tasks.push(Task::perform(
@@ -1127,6 +1192,20 @@ impl cosmic::Application for AppModel {
             }
             Message::RemindersFired(fired) => {
                 self.fired_reminders.extend(fired);
+            }
+            Message::ShowDayAgenda(date) => {
+                self.calendar.set_date(self.calendar.selected_date.replace_date(date));
+                self.context_page = ContextPage::DayAgenda;
+                self.update_drawer_layout();
+                self.core.set_show_context(true);
+            }
+            Message::CloseDayAgenda => {
+                if self.context_page == ContextPage::DayAgenda && self.core.window.show_context {
+                    self.core.set_show_context(false);
+                    tasks.push(widget::button::focus(crate::features::calendar::month::day_id(
+                        self.calendar.selected_date.date(),
+                    )));
+                }
             }
             Message::SelectDate(date) => {
                 self.calendar.set_date(date);
@@ -1190,7 +1269,26 @@ impl cosmic::Application for AppModel {
                 }
             }
         }
+        self.update_drawer_layout();
         Task::batch(tasks)
+    }
+
+    fn on_window_resize(&mut self, id: cosmic::iced::window::Id, width: f32, _height: f32) {
+        if self.core.main_window_is(id) {
+            self.window_width = width;
+            self.update_drawer_layout();
+        }
+    }
+
+    fn on_escape(&mut self) -> Task<cosmic::Action<Self::Message>> {
+        if self.context_page == ContextPage::DayAgenda
+            && self.core.window.show_context
+            && self.editing_event.is_none()
+        {
+            cosmic::task::message(Message::CloseDayAgenda)
+        } else {
+            Task::none()
+        }
     }
 
     /// Called when a nav item is selected.
@@ -1216,6 +1314,20 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn update_drawer_layout(&mut self) {
+        // Below this width the native drawer would squeeze the seven day columns.
+        let overlay = self.context_page != ContextPage::DayAgenda
+            || self.window_width / self.core.scale_factor() < 1_000.0;
+        if self.core.window.context_is_overlay != overlay {
+            self.core.window.context_is_overlay = overlay;
+            self.core.set_show_context(self.core.window.show_context);
+        }
+    }
+
+    fn show_month(&self) -> bool {
+        matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month)) && self.search_query.is_empty()
+    }
+
     /// The about page for this app.
     pub fn about<'a>(&'a self) -> Element<'a, Message> {
         let cosmic_theme::Spacing { space_xxs, .. } = theme::active().cosmic().spacing;
@@ -1380,6 +1492,7 @@ pub enum ContextPage {
     #[default]
     About,
     CalendarManager,
+    DayAgenda,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
