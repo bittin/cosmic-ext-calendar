@@ -48,6 +48,12 @@ struct IcsImportState {
     result: Option<std::result::Result<(usize, usize), String>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CalendarClick {
+    Event(EventSelection),
+    EmptySlot(OffsetDateTime),
+}
+
 enum CalendarPopup {
     Details(EventSelection, Box<Event>, Option<String>),
     PasteError,
@@ -97,7 +103,7 @@ pub struct AppModel {
     calendar: LocalCalendar,
     calendar_popup: Option<OpenCalendarPopup>,
     calendar_clipboard: Option<CalendarClipboard>,
-    calendar_click: Option<(EventSelection, std::time::Instant)>,
+    calendar_click: Option<(CalendarClick, std::time::Instant)>,
     // Local calendar/event storage, persisted to disk as JSON.
     storage: Arc<Mutex<LocalStorage>>,
     // State of the event editor drawer, when open.
@@ -148,6 +154,7 @@ pub enum Message {
     SelectDay(usize),
     OpenEventEditor(Option<EventId>, OffsetDateTime),
     CalendarEventClicked(EventSelection, CalendarAnchor),
+    CalendarEmptySlotClicked(OffsetDateTime),
     CloseCalendarPopup,
     CalendarAction(CalendarAction, Option<EventSelection>, OffsetDateTime),
     CloseEventEditor,
@@ -702,20 +709,23 @@ impl cosmic::Application for AppModel {
         let mut tasks = vec![];
         match message {
             Message::CalendarEventClicked(key, anchor) => {
-                let now = std::time::Instant::now();
-                let double = self.calendar_click.is_some_and(|(last, at)| {
-                    key == last && now.duration_since(at) <= std::time::Duration::from_millis(400)
-                });
                 self.calendar.selected_event = Some(key);
-                self.calendar_click = (!double).then_some((key, now));
-                if double {
+                if self.calendar_double_click(CalendarClick::Event(key)) {
                     self.open_event_details(key, Some(anchor));
                 } else {
                     self.calendar_popup = None;
                 }
             }
+            Message::CalendarEmptySlotClicked(date) => {
+                self.calendar.selected_event = None;
+                self.calendar_popup = None;
+                if self.calendar_double_click(CalendarClick::EmptySlot(date)) {
+                    return self.update(Message::AddEvent(date));
+                }
+            }
             Message::CloseCalendarPopup => self.calendar_popup = None,
             Message::CalendarAction(action, selection, date) => {
+                self.calendar_click = None;
                 self.calendar_popup = None;
                 match action {
                     CalendarAction::Edit => {
@@ -796,7 +806,11 @@ impl cosmic::Application for AppModel {
             Message::TabSelected(tab) => {
                 self.calendar_popup = None;
                 self.calendar_click = None;
+                let changed = self.tabs.active() != tab;
                 self.tabs.activate(tab);
+                if changed {
+                    tasks.push(self.scroll_calendar_to_now());
+                }
                 if self.context_page == ContextPage::DayAgenda
                     && !matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month))
                 {
@@ -845,6 +859,7 @@ impl cosmic::Application for AppModel {
                 }
             },
             Message::AddEvent(date) => {
+                self.calendar_click = None;
                 tasks.push(cosmic::task::message(Message::OpenEventEditor(None, date)));
             }
             Message::OpenEventEditor(event_id, date) => {
@@ -1513,7 +1528,11 @@ impl cosmic::Application for AppModel {
                 Err(err) => tracing::error!("failed to delete calendar: {err}"),
             },
             Message::SearchChanged(query) => {
+                let returning_to_calendar = !self.search_query.is_empty() && query.is_empty();
                 self.search_query = query;
+                if returning_to_calendar {
+                    tasks.push(self.scroll_calendar_to_now());
+                }
                 if self.context_page == ContextPage::DayAgenda && !self.search_query.is_empty() {
                     self.core.set_show_context(false);
                 }
@@ -1638,7 +1657,10 @@ impl cosmic::Application for AppModel {
                     tracing::error!("failed to select date");
                 }
             }
-            Message::NavigateToday => self.calendar.set_today(),
+            Message::NavigateToday => {
+                self.calendar.set_today();
+                tasks.push(self.scroll_calendar_to_now());
+            }
             Message::NavigateNextDay => {
                 if let Err(err) = self.calendar.next_day() {
                     tracing::error!("failed to navigate to next day: {err}");
@@ -1718,6 +1740,26 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn scroll_calendar_to_now(&self) -> Task<cosmic::Action<Message>> {
+        if self.search_query.is_empty() {
+            match self.tabs.active_data::<Tab>() {
+                Some(Tab::Week) => return self.calendar.scroll_to_now(true),
+                Some(Tab::Day) => return self.calendar.scroll_to_now(false),
+                _ => {}
+            }
+        }
+        Task::none()
+    }
+
+    fn calendar_double_click(&mut self, target: CalendarClick) -> bool {
+        let now = std::time::Instant::now();
+        let double_click = self.calendar_click.is_some_and(|(previous, at)| {
+            target == previous && now.duration_since(at) <= std::time::Duration::from_millis(400)
+        });
+        self.calendar_click = (!double_click).then_some((target, now));
+        double_click
+    }
+
     fn open_event_details(&mut self, key: EventSelection, anchor: Option<CalendarAnchor>) {
         let storage = self.storage.lock().unwrap();
         self.calendar_popup = storage.get_event(key.0).map(|event| {

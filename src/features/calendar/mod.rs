@@ -13,8 +13,8 @@ use cosmic::{
 use std::collections::HashMap;
 use time::{Date, Duration, Month, OffsetDateTime, Time, UtcOffset};
 
-mod day;
 pub(crate) mod month;
+mod time_grid;
 mod week;
 
 pub(crate) fn display_time(date: OffsetDateTime, zone: Option<chrono_tz::Tz>) -> OffsetDateTime {
@@ -40,7 +40,7 @@ pub(crate) type EventSelection = (crate::shared::ids::EventId, OffsetDateTime);
 pub enum CalendarAnchor {
     Month(Date, EventSelection),
     Agenda(Date, EventSelection),
-    Grid(OffsetDateTime, EventSelection),
+    Grid(Date, EventSelection),
     AllDay(Date, EventSelection),
 }
 
@@ -62,15 +62,26 @@ fn context_menu<'a>(
     widget::context_menu(content, Some(menu::items(&HashMap::new(), items))).into()
 }
 
+const EVENT_CARD_RADIUS: f32 = 5.0;
+
 fn event_card_style(
     active: impl Fn(bool, &cosmic::Theme) -> button::Style + Clone + 'static,
     disabled: impl Fn(&cosmic::Theme) -> button::Style + 'static,
 ) -> Button {
+    let active = move |focused, theme: &cosmic::Theme| {
+        let mut style = active(focused, theme);
+        style.border_radius = EVENT_CARD_RADIUS.into();
+        style
+    };
     Button::Custom {
         active: Box::new(active.clone()),
         hovered: Box::new(active.clone()),
         pressed: Box::new(active),
-        disabled: Box::new(disabled),
+        disabled: Box::new(move |theme| {
+            let mut style = disabled(theme);
+            style.border_radius = EVENT_CARD_RADIUS.into();
+            style
+        }),
     }
 }
 
@@ -141,98 +152,32 @@ fn all_day_cell<'a>(date: Date, items: &[Occurrence], app: &'a AppModel) -> Elem
         .filter(|item| item.time.is_none() && item.first <= date && date <= item.last)
     {
         let anchor = CalendarAnchor::AllDay(date, item.key());
+        let mut content = widget::column(Vec::new())
+            .push(widget::text::caption_heading(item.title.clone()).wrapping(Wrapping::None));
+        let mut label = item.title.clone();
+        if let Some(location) = &item.location {
+            content =
+                content.push(widget::text::caption(location.clone()).wrapping(Wrapping::None));
+            label.push_str(", ");
+            label.push_str(location);
+        }
         column = column.push(event_target(
             app,
-            widget::button::custom(
-                widget::container(
-                    widget::text::caption(item.title.clone()).wrapping(Wrapping::None),
-                )
+            widget::button::custom(widget::container(content).width(Length::Fill).clip(true))
                 .width(Length::Fill)
-                .clip(true),
-            )
-            .width(Length::Fill)
-            .padding([4, 6])
-            .class(event_button_style(
-                item.selected,
-                Button::Text,
-                Button::Standard,
-            ))
-            .name(item.title.clone())
-            .on_press(item.open(anchor)),
+                .padding([4, 6])
+                .class(event_button_style(
+                    item.selected,
+                    Button::Text,
+                    Button::Standard,
+                ))
+                .name(label)
+                .on_press(item.open(anchor)),
             item,
             anchor,
         ));
     }
     column.into()
-}
-
-fn time_slot<'a>(
-    date: OffsetDateTime,
-    hour: u8,
-    half_hour: bool,
-    items: &[Occurrence],
-    app: &'a AppModel,
-) -> Element<'a, Message> {
-    let minute = if half_hour { 30 } else { 0 };
-    let cell_time = date.replace_time(Time::from_hms(hour, minute, 0).unwrap());
-    let start = cell_time.time();
-    let end = cell_time
-        .checked_add(Duration::minutes(30))
-        .filter(|end| end.date() == date.date())
-        .map(|end| end.time());
-    let mut events = items
-        .iter()
-        .filter(|item| {
-            item.time.is_some()
-                && item.first <= date.date()
-                && date.date() <= item.last
-                && (item.first != date.date()
-                    || end.is_none_or(|end| item.display_start.time() < end))
-                && (item.last != date.date() || item.display_end.time() >= start)
-        })
-        .peekable();
-    if events.peek().is_none() {
-        return paste_target(
-            app,
-            widget::button::custom(widget::text(""))
-                .name(crate::fl!(
-                    "calendar-add-at",
-                    date = month::agenda_date(date.date()),
-                    time = format!("{hour:02}:{minute:02}")
-                ))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .class(cosmic::style::Button::Text)
-                .on_press(crate::app::Message::AddEvent(cell_time)),
-            cell_time,
-        );
-    }
-    events
-        .fold(widget::row(Vec::new()).width(Length::Fill), |row, item| {
-            let anchor = CalendarAnchor::Grid(cell_time, item.key());
-            row.push(event_target(
-                app,
-                widget::button::custom(
-                    widget::container(
-                        widget::text::caption(item.title.clone()).wrapping(Wrapping::None),
-                    )
-                    .clip(true)
-                    .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .class(event_button_style(
-                    item.selected,
-                    Button::Standard,
-                    Button::Suggested,
-                ))
-                .name(item.title.clone())
-                .on_press(item.open(anchor)),
-                item,
-                anchor,
-            ))
-        })
-        .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,7 +271,14 @@ impl LocalCalendar {
             self.display_timezone,
             self.selected_event,
         );
-        let time_grid = week::week_grid(&week_start, &items, app);
+        let time_grid = time_grid::view(
+            week_start,
+            7,
+            week::TIME_COLUMN_WIDTH,
+            time_grid::WEEK_SLOT_HEIGHT,
+            &items,
+            app,
+        );
         let all_day = (0..7).fold(
             widget::row(Vec::new()).push(
                 widget::container(widget::text::caption(crate::fl!("all-day")))
@@ -340,6 +292,7 @@ impl LocalCalendar {
             .push(all_day)
             .push(
                 widget::scrollable(time_grid)
+                    .id(time_grid::scroll_id(true))
                     .height(Length::Fill)
                     .width(Length::Fill),
             )
@@ -359,15 +312,31 @@ impl LocalCalendar {
             self.display_timezone,
             self.selected_event,
         );
-        let time_grid = day::single_day_time_grid(&self.selected_date, &items, app);
+        let time_grid = time_grid::view(
+            self.selected_date,
+            1,
+            100,
+            time_grid::DAY_SLOT_HEIGHT,
+            &items,
+            app,
+        );
         let all_day = widget::row(Vec::new())
             .push(widget::text::caption(crate::fl!("all-day")).width(100))
             .push(all_day_cell(date, &items, app));
 
         widget::column(Vec::new())
             .push(all_day)
-            .push(widget::scrollable(time_grid).height(Length::Fill))
+            .push(
+                widget::scrollable(time_grid)
+                    .id(time_grid::scroll_id(false))
+                    .height(Length::Fill),
+            )
             .padding([0, 0, spacing().space_xxs, 0])
+    }
+
+    pub(crate) fn scroll_to_now<T>(&self, week: bool) -> cosmic::iced::Task<T> {
+        let now = display_time(OffsetDateTime::now_utc(), self.display_timezone);
+        time_grid::scroll_to_time(now.time(), week)
     }
 
     pub fn set_today(&mut self) {

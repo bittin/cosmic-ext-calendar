@@ -31,12 +31,14 @@ pub(super) struct Occurrence {
     pub(super) selected: bool,
     pub(super) display_start: OffsetDateTime,
     pub(super) display_end: OffsetDateTime,
+    pub(super) display_end_exclusive: OffsetDateTime,
     pub(super) start: OffsetDateTime,
     pub(super) first: Date,
     pub(super) last: Date,
     pub(super) time: Option<String>,
     pub(super) title: String,
-    calendar: Option<String>,
+    pub(super) location: Option<String>,
+    pub(super) calendar: Option<String>,
     color: Option<Color>,
 }
 
@@ -106,23 +108,21 @@ fn occurrences_with_calendars<'a>(
         let upper = utc_midnight(last).saturating_add(Duration::days(2));
 
         for start in event.occurrences(lower..upper) {
-            let display_start = if all_day || event.floating {
-                start
-            } else {
-                display_time(start, zone)
+            let display = |instant| {
+                if all_day || event.floating {
+                    instant
+                } else {
+                    display_time(instant, zone)
+                }
             };
+            let display_start = display(start);
+            let end = start.saturating_add(duration);
             let inclusive_end = if duration.is_zero() {
                 start
             } else {
-                start
-                    .saturating_add(duration)
-                    .saturating_sub(Duration::NANOSECOND)
+                end.saturating_sub(Duration::NANOSECOND)
             };
-            let display_end = if all_day || event.floating {
-                inclusive_end
-            } else {
-                display_time(inclusive_end, zone)
-            };
+            let display_end = display(inclusive_end);
             if display_start.date() > last || display_end.date() < first {
                 continue;
             }
@@ -133,11 +133,18 @@ fn occurrences_with_calendars<'a>(
                 start,
                 display_start,
                 display_end,
+                display_end_exclusive: display(end),
                 first: display_start.date(),
                 last: display_end.date(),
                 time: (!all_day)
                     .then(|| format!("{:02}:{:02}", display_start.hour(), display_start.minute())),
                 title: event.summary.clone(),
+                location: event
+                    .location
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|location| !location.is_empty())
+                    .map(str::to_owned),
                 calendar: calendar.map(|calendar| calendar.name.clone()),
                 color: event.color.as_deref().and_then(calendar_color).or_else(|| {
                     calendar
@@ -535,7 +542,6 @@ fn event_button<'a>(event: &Occurrence, date: Date, app: &'a AppModel) -> Elemen
                 let accent = accent_or_calendar_color(theme, color);
                 blend(base, accent, if selected { 0.48 } else { 0.22 }).into()
             });
-            style.border_radius = 5.0.into();
             style
         },
         |theme| theme.disabled(&Button::MenuItem),
@@ -633,7 +639,7 @@ pub(super) fn agenda<'a>(
     content.into()
 }
 
-fn blend(base: Color, accent: Color, amount: f32) -> Color {
+pub(super) fn blend(base: Color, accent: Color, amount: f32) -> Color {
     Color::from_rgb(
         base.r + (accent.r - base.r) * amount,
         base.g + (accent.g - base.g) * amount,
