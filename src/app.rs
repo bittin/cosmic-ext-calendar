@@ -9,28 +9,22 @@ use crate::features::event::state::{
 };
 use crate::shared::config::Config;
 use crate::fl;
-use crate::features::calendar_management::model::{Calendar, CalendarKey, LocalCalendarMeta};
+use crate::features::calendar_management::model::{CalendarKey, LocalCalendarMeta};
 use crate::features::event::model::Event;
 use crate::shared::ids::{CalendarId, EventId};
-use crate::features::accounts::CalendarServiceFactory;
 use crate::features::ics;
 use crate::shared::storage::LocalStorage;
-use crate::Result;
-use accounts::models::{Account, Service};
-use accounts::AccountsClient;
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::dialog::file_chooser;
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::futures::channel::mpsc::Sender;
-use cosmic::iced::{stream, Alignment, Length, Subscription};
+use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
 use cosmic::theme::spacing;
 use cosmic::widget::segmented_button::SingleSelect;
 use cosmic::widget::{self, menu, nav_bar};
 use cosmic::{cosmic_theme, theme};
-use futures_util::{SinkExt, StreamExt};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ops::Index;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -43,16 +37,6 @@ pub use settings::*;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
-
-/// Wraps subscription data alongside a stable identifier used for hashing,
-/// since the wrapped client itself does not implement [`std::hash::Hash`].
-struct AccountSubscription<T>(&'static str, T);
-
-impl<T> std::hash::Hash for AccountSubscription<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
@@ -71,9 +55,6 @@ pub struct AppModel {
     config: Config,
     // Calendar data that persists between application runs.
     calendar: LocalCalendar,
-    client: Option<AccountsClient>,
-    accounts: VecDeque<Account>,
-    calendars: BTreeMap<Account, Vec<Calendar>>,
     // Local calendar/event storage, persisted to disk as JSON.
     storage: Arc<Mutex<LocalStorage>>,
     // State of the event editor drawer, when open.
@@ -101,7 +82,6 @@ pub struct AppModel {
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenRepositoryUrl,
-    SubscriptionChannel,
     ToggleContextPage(ContextPage),
     UpdateConfig(Config),
     TabSelected(widget::segmented_button::Entity),
@@ -118,13 +98,6 @@ pub enum Message {
     SelectMonth(usize),
     SelectYear(usize),
     SelectDay(usize),
-    LoadClient,
-    SetClient(Option<AccountsClient>),
-    LoadAccounts,
-    ReloadAccounts,
-    SetAccounts(VecDeque<Account>),
-    LoadCalendars,
-    AddCalendars((Account, Vec<Calendar>)),
     OpenEventEditor(Option<EventId>, OffsetDateTime),
     CloseEventEditor,
     EventEditorSummaryChanged(String),
@@ -253,9 +226,6 @@ impl cosmic::Application for AppModel {
                 })
                 .unwrap_or_default(),
             calendar: LocalCalendar::default(),
-            client: None,
-            accounts: VecDeque::new(),
-            calendars: BTreeMap::new(),
             storage: Arc::new(Mutex::new(LocalStorage::load().unwrap_or_else(|err| {
                 tracing::error!("failed to load local storage: {err}");
                 LocalStorage::empty()
@@ -268,8 +238,7 @@ impl cosmic::Application for AppModel {
             fired_reminders: std::collections::HashSet::new(),
         };
 
-        // Seed a default calendar on first run so the app is usable offline
-        // without requiring a linked account.
+        // Seed a default calendar on first run.
         {
             let mut storage = app.storage.lock().unwrap();
             if storage.list_calendars().is_empty() {
@@ -293,10 +262,7 @@ impl cosmic::Application for AppModel {
         // Create a startup command that sets the window title.
         let command = app.update_title();
 
-        (
-            app,
-            Task::batch(vec![command, cosmic::task::message(Message::LoadClient)]),
-        )
+        (app, command)
     }
 
     /// Elements to pack at the start of the header bar.
@@ -577,91 +543,12 @@ impl cosmic::Application for AppModel {
         let reminders_tick =
             cosmic::iced::time::every(std::time::Duration::from_secs(30)).map(|_| Message::CheckReminders);
 
-        let Some(client) = self.client.clone() else {
-            return Subscription::batch(vec![reminders_tick]);
-        };
-        let account_changed_client = client.clone();
-        let account_removed_client = client.clone();
+        let config_updates = self
+            .core()
+            .watch_config::<Config>(Self::APP_ID)
+            .map(|update| Message::UpdateConfig(update.config));
 
-        Subscription::batch(vec![
-            reminders_tick,
-            // Create a subscription which emits updates through a channel.
-            Subscription::run_with((), |()| {
-                cosmic::iced::stream::channel(4, move |mut channel: Sender<Message>| async move {
-                    _ = channel.send(Message::SubscriptionChannel).await;
-
-                    futures_util::future::pending().await
-                })
-            }),
-            // Watch for application configuration changes.
-            self.core()
-                .watch_config::<Config>(Self::APP_ID)
-                .map(|update| {
-                    // for why in update.errors {
-                    //     tracing::error!(?why, "app config error");
-                    // }
-
-                    Message::UpdateConfig(update.config)
-                }),
-            Subscription::run_with(
-                AccountSubscription("account_added", client),
-                |AccountSubscription(_, client)| {
-                    let client = client.clone();
-                    stream::channel(1, move |mut output: Sender<Message>| async move {
-                        if let Ok(mut account_added_stream) = client.receive_account_added().await {
-                            while let Some(_) = account_added_stream.next().await {
-                                if let Err(err) = output.send(Message::ReloadAccounts).await {
-                                    tracing::warn!(
-                                        "failed to send message from subscription: {}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    })
-                },
-            ),
-            Subscription::run_with(
-                AccountSubscription("account_changed", account_changed_client),
-                |AccountSubscription(_, client)| {
-                    let client = client.clone();
-                    stream::channel(1, move |mut output: Sender<Message>| async move {
-                        if let Ok(mut account_changed_stream) =
-                            client.receive_account_changed().await
-                        {
-                            while let Some(_) = account_changed_stream.next().await {
-                                if let Err(err) = output.send(Message::ReloadAccounts).await {
-                                    tracing::warn!(
-                                        "failed to send message from subscription: {}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    })
-                },
-            ),
-            Subscription::run_with(
-                AccountSubscription("account_removed", account_removed_client),
-                |AccountSubscription(_, client)| {
-                    let client = client.clone();
-                    stream::channel(1, move |mut output: Sender<Message>| async move {
-                        if let Ok(mut account_removed_stream) =
-                            client.receive_account_removed().await
-                        {
-                            while let Some(_) = account_removed_stream.next().await {
-                                if let Err(err) = output.send(Message::ReloadAccounts).await {
-                                    tracing::warn!(
-                                        "failed to send message from subscription: {}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    })
-                },
-            ),
-        ])
+        Subscription::batch([reminders_tick, config_updates])
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -676,9 +563,6 @@ impl cosmic::Application for AppModel {
             }
             Message::OpenRepositoryUrl => {
                 _ = open::that_detached(REPOSITORY);
-            }
-            Message::SubscriptionChannel => {
-                // For example purposes only.
             }
             Message::ToggleContextPage(context_page) => {
                 if self.context_page == context_page {
@@ -699,74 +583,6 @@ impl cosmic::Application for AppModel {
                     eprintln!("failed to open {url:?}: {err}");
                 }
             },
-            Message::LoadClient => tasks.push(Task::perform(
-                async { AccountsClient::new().await.ok() },
-                |client| cosmic::action::app(Message::SetClient(client)),
-            )),
-            Message::SetClient(client) => {
-                self.client = client;
-                tasks.push(cosmic::task::message(Message::LoadAccounts));
-            }
-            Message::ReloadAccounts => {
-                self.nav.clear();
-                tasks.push(cosmic::task::message(Message::LoadAccounts));
-            }
-            Message::LoadAccounts => {
-                if let Some(client) = self.client.as_ref() {
-                    let client = client.clone();
-                    tasks.push(Task::perform(
-                        async move {
-                            let accounts = client.list_enabled_accounts(Service::Calendar).await?;
-                            Ok(VecDeque::from(accounts))
-                        },
-                        |accounts: Result<VecDeque<Account>>| match accounts {
-                            Ok(accounts) => cosmic::action::app(Message::SetAccounts(accounts)),
-                            Err(err) => {
-                                tracing::error!("Failed to load accounts: {}", err);
-                                cosmic::action::none()
-                            }
-                        },
-                    ));
-                }
-            }
-            Message::SetAccounts(accounts) => {
-                self.accounts = accounts;
-                tasks.push(cosmic::task::message(Message::LoadCalendars));
-            }
-            Message::LoadCalendars => {
-                let accounts = self.accounts.clone();
-                for account in accounts {
-                    tasks.push(cosmic::Task::perform(
-                        async move {
-                            let mut service = CalendarServiceFactory::get_service(&account).await?;
-                            let calendars = service.fetch_calendars().await?;
-                            Ok((account.clone(), calendars))
-                        },
-                        |calendars: Result<(Account, Vec<Calendar>)>| match calendars {
-                            Ok((account, calendars)) => {
-                                cosmic::action::app(Message::AddCalendars((account, calendars)))
-                            }
-                            Err(err) => {
-                                tracing::error!("Failed to load calendars: {}", err);
-                                cosmic::action::none()
-                            }
-                        },
-                    ));
-                }
-            }
-            Message::AddCalendars((account, calendars)) => {
-                self.core.nav_bar_set_toggled(true);
-                self.calendars.insert(account.clone(), calendars.clone());
-                self.nav.insert().text(account.username);
-                for calendar in calendars {
-                    self.nav
-                        .insert()
-                        .indent(1)
-                        .text(calendar.name.clone())
-                        .icon(widget::icon::from_name("office-calendar-symbolic"))
-                        .data(calendar);
-                }
-            }
             Message::AddEvent(date) => {
                 tasks.push(cosmic::task::message(Message::OpenEventEditor(None, date)));
             }

@@ -1,4 +1,3 @@
-use accounts::models::Provider;
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
@@ -51,8 +50,8 @@ pub struct Reminder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalRef {
     pub account_id: Uuid,
-    pub provider: Provider,
-    /// The provider's calendar id (matches `Calendar::id`).
+    pub provider: String,
+    /// The provider's calendar id (assigned by the provider).
     pub calendar_id: String,
     pub provider_event_id: String,
     /// Used for future conflict detection against the provider's copy.

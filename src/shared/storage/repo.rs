@@ -13,8 +13,7 @@ use super::{atomic, index::EventIndex, migration, paths};
 use crate::Result;
 
 /// The local, file-backed store for calendars and events created in this
-/// app. Provider-fetched calendars (`crate::features::calendar_management::model::Calendar`) are not
-/// persisted here; they're refetched from the network as today.
+/// app.
 pub struct LocalStorage {
     index: EventIndex,
     calendars: HashMap<CalendarId, LocalCalendarMeta>,
@@ -157,7 +156,7 @@ impl LocalStorage {
 
     fn write_event(&self, event: &Event) -> Result<()> {
         let CalendarKey::Local(calendar_id) = &event.calendar else {
-            // Provider-backed events aren't persisted locally yet (phase 5).
+            // This store only persists events assigned to local calendars.
             return Ok(());
         };
         let path = paths::event_path(calendar_id, &event.id);
