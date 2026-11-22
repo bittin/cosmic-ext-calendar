@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::features::calendar::{CalendarAnchor, EventSelection, LocalCalendar};
-use crate::features::calendar_management::model::{CalendarKey, LocalCalendarMeta};
-use crate::features::calendar_management::state::{CalendarEditState, CalendarManagerState};
+use crate::features::calendar::{CalendarAnchor, CalendarSlot, EventSelection, LocalCalendar};
+use crate::features::calendar_management::model::{CalendarKey, LocalCalendarMeta, calendar_color};
+use crate::features::calendar_management::{state::CalendarForm, view as calendar_form};
 use crate::features::event::model::{Event, EventTime};
 use crate::features::event::recurrence::{RecurrenceEnd, RecurrenceFreq};
 use crate::features::event::state::{
@@ -11,7 +11,7 @@ use crate::features::event::state::{
 };
 use crate::features::ics;
 use crate::fl;
-use crate::shared::config::Config;
+use crate::shared::config::{AppTheme, Config};
 use crate::shared::ids::{CalendarId, EventId};
 use crate::shared::storage::LocalStorage;
 use cosmic::app::context_drawer;
@@ -21,7 +21,7 @@ use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
 use cosmic::theme::spacing;
-use cosmic::widget::segmented_button::SingleSelect;
+use cosmic::widget::{color_picker::ColorPickerUpdate, segmented_button::SingleSelect};
 use cosmic::widget::{self, menu, nav_bar};
 use cosmic::{cosmic_theme, theme};
 use std::collections::HashMap;
@@ -45,18 +45,16 @@ struct IcsImportState {
     path: Option<PathBuf>,
     calendar: Option<CalendarId>,
     busy: bool,
-    result: Option<std::result::Result<(usize, usize), String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CalendarClick {
     Event(EventSelection),
-    EmptySlot(OffsetDateTime),
+    EmptySlot(CalendarSlot),
 }
 
 enum CalendarPopup {
     Details(EventSelection, Box<Event>, Option<String>),
-    PasteError,
 }
 
 struct OpenCalendarPopup {
@@ -97,7 +95,7 @@ pub struct AppModel {
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     // Configuration data that persists between application runs.
     config: Config,
-    display_timezone_input: String,
+    display_timezone_options: Vec<String>,
     ics_import: IcsImportState,
     // Calendar data that persists between application runs.
     calendar: LocalCalendar,
@@ -106,6 +104,10 @@ pub struct AppModel {
     calendar_click: Option<(CalendarClick, std::time::Instant)>,
     // Local calendar/event storage, persisted to disk as JSON.
     storage: Arc<Mutex<LocalStorage>>,
+    toasts: widget::Toasts<Message>,
+    storage_read_only: bool,
+    calendar_to_archive: Option<(CalendarId, String)>,
+    calendar_archive_busy: bool,
     // State of the event editor drawer, when open.
     editing_event: Option<EventEditorState>,
     // Multi-select segmented button backing the reminder-preset picker in
@@ -114,11 +116,11 @@ pub struct AppModel {
     // truth that's actually persisted, since `segmented_button::Model` isn't
     // `Clone` and can't live inside `EventEditorState`.
     reminders_model: widget::segmented_button::Model<widget::segmented_button::MultiSelect>,
-    // State of the calendar manager drawer.
-    calendar_manager: CalendarManagerState,
+    calendar_form: Option<CalendarForm>,
     // Nav bar entity ids for the "Calendars" header + per-calendar rows,
     // tracked so they can be torn down and rebuilt on every CRUD change.
     calendar_nav_ids: Vec<nav_bar::Id>,
+    calendars_collapsed: bool,
     // Current text in the header search bar; non-empty replaces the main
     // view with search results.
     search_query: String,
@@ -131,11 +133,12 @@ pub struct AppModel {
 /// Messages emitted by the application and its widgets.
 #[derive(Debug, Clone)]
 pub enum Message {
+    MenuSurface(cosmic::surface::Action),
     OpenRepositoryUrl,
     ToggleContextPage(ContextPage),
     UpdateConfig(Config),
-    DisplayTimezoneInput(String),
-    ApplyDisplayTimezone,
+    SetTheme(AppTheme),
+    SetDisplayTimezone(usize),
     TabSelected(widget::segmented_button::Entity),
     LaunchUrl(String),
     NavigateNextDay,
@@ -152,9 +155,9 @@ pub enum Message {
     SelectMonth(usize),
     SelectYear(usize),
     SelectDay(usize),
-    OpenEventEditor(Option<EventId>, OffsetDateTime),
+    OpenEventEditor(Option<EventId>, OffsetDateTime, bool),
     CalendarEventClicked(EventSelection, CalendarAnchor),
-    CalendarEmptySlotClicked(OffsetDateTime),
+    CalendarEmptySlotClicked(CalendarSlot),
     CloseCalendarPopup,
     CalendarAction(CalendarAction, Option<EventSelection>, OffsetDateTime),
     CloseEventEditor,
@@ -197,21 +200,23 @@ pub enum Message {
     ConfirmIcsImport,
     IcsImported(std::result::Result<(usize, usize), String>),
     ExportIcs,
-    IcsExported(std::result::Result<PathBuf, String>),
+    IcsExported(std::result::Result<Option<PathBuf>, String>),
     OpenNewCalendarForm,
-    CalendarManagerNewNameChanged(String),
-    CreateCalendar,
-    CalendarCreated(std::result::Result<LocalCalendarMeta, String>),
     StartEditCalendar(CalendarId),
-    CalendarEditNameChanged(String),
-    CalendarEditColorChanged(String),
-    SaveCalendarEdit,
-    CalendarEditSaved(std::result::Result<(), String>),
-    CancelCalendarEdit,
+    CalendarNameChanged(String),
+    SetCalendarColor(Option<String>),
+    CalendarColorPicker(ColorPickerUpdate),
+    SaveCalendarForm,
+    CalendarFormSaved(std::result::Result<(), String>),
+    CloseCalendarForm,
     ToggleCalendarVisibility(CalendarId, bool),
     CalendarVisibilityToggled(std::result::Result<(), String>),
     DeleteCalendar(CalendarId),
-    CalendarDeleted(std::result::Result<CalendarId, String>),
+    CancelArchiveCalendar,
+    ConfirmArchiveCalendar,
+    RestoreCalendar(CalendarId),
+    CalendarArchiveChanged(std::result::Result<(), String>),
+    CloseToast(widget::ToastId),
     SearchChanged(String),
     SelectSearchResult(EventId, OffsetDateTime),
     EventEditorReminderToggled(widget::segmented_button::Entity),
@@ -272,6 +277,13 @@ impl cosmic::Application for AppModel {
             })
             .build();
 
+        let mut display_timezone_options = chrono_tz::TZ_VARIANTS
+            .iter()
+            .map(|zone| zone.name().to_owned())
+            .collect::<Vec<_>>();
+        display_timezone_options.sort_unstable();
+        display_timezone_options.insert(0, fl!("display-timezone-system"));
+
         // Construct the app model with the runtime's core.
         let mut app = AppModel {
             core,
@@ -293,7 +305,7 @@ impl cosmic::Application for AppModel {
                     }
                 })
                 .unwrap_or_default(),
-            display_timezone_input: String::new(),
+            display_timezone_options,
             ics_import: IcsImportState::default(),
             calendar: LocalCalendar::default(),
             calendar_popup: None,
@@ -301,30 +313,45 @@ impl cosmic::Application for AppModel {
             calendar_click: None,
             storage: Arc::new(Mutex::new(LocalStorage::load().unwrap_or_else(|err| {
                 tracing::error!("failed to load local storage: {err}");
-                LocalStorage::empty()
+                LocalStorage::unavailable(err.to_string())
             }))),
+            toasts: widget::Toasts::new(Message::CloseToast),
+            storage_read_only: false,
+            calendar_to_archive: None,
+            calendar_archive_busy: false,
             editing_event: None,
             reminders_model: build_reminders_model(&[]),
-            calendar_manager: CalendarManagerState::default(),
+            calendar_form: None,
             calendar_nav_ids: Vec::new(),
+            calendars_collapsed: false,
             search_query: String::new(),
             fired_reminders: std::collections::HashSet::new(),
             checking_reminders: false,
         };
 
-        // Seed a default calendar on first run.
+        let mut tasks = Vec::new();
+        // Seed a default calendar only if the store has no calendar records.
         {
             let mut storage = app.storage.lock().unwrap();
-            if storage.list_calendars().is_empty() {
+            if let Some(error) = storage.load_error() {
+                app.storage_read_only = true;
+                let toast = widget::Toast::new(fl!("calendar-storage-load-error", error = error))
+                    .duration(widget::toaster::Duration::Long);
+                tasks.push(app.toasts.push(toast).map(cosmic::action::app));
+            } else if !storage.has_calendars() {
                 let personal = LocalCalendarMeta {
                     id: crate::shared::ids::CalendarId::new(),
                     name: fl!("personal-calendar"),
                     description: None,
                     color: None,
                     visible: true,
+                    archived: false,
                 };
                 if let Err(err) = storage.create_calendar(personal) {
-                    tracing::error!("failed to create default calendar: {err}");
+                    let toast =
+                        widget::Toast::new(fl!("default-calendar-error", error = err.to_string()));
+                    tasks.push(app.toasts.push(toast).map(cosmic::action::app));
+                    app.calendar_form = Some(CalendarForm::new(None, String::new(), None));
                 }
             }
         }
@@ -333,54 +360,54 @@ impl cosmic::Application for AppModel {
 
         app.core.nav_bar_set_toggled(false);
 
-        // Create a startup command that sets the window title.
-        let command = app.update_title();
+        tasks.push(app.update_title());
+        tasks.push(cosmic::command::set_theme(app.config.app_theme.theme()));
 
-        app.display_timezone_input = app.config.display_timezone.clone();
         app.refresh_display_timezone();
         app.calendar.set_today();
 
-        (app, command)
+        (app, Task::batch(tasks))
     }
 
     /// Elements to pack at the start of the header bar.
     fn header_start<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
         let menu_bar = menu::bar(vec![menu::Tree::with_children(
-            menu::root(fl!("view")).apply(Element::from),
+            widget::RcElementWrapper::new(
+                widget::button::icon(widget::icon::from_name("open-menu-symbolic"))
+                    .padding([4, 12])
+                    .class(theme::Button::MenuRoot)
+                    .name(fl!("app-menu"))
+                    .into(),
+            ),
             menu::items(
                 &self.key_binds,
                 vec![
+                    menu::Item::Button(fl!("new-calendar"), None, MenuAction::NewCalendar),
                     menu::Item::Button(fl!("import-ics"), None, MenuAction::ImportIcs),
                     menu::Item::Button(fl!("export-ics"), None, MenuAction::ExportIcs),
-                    menu::Item::Button(fl!("display-timezone"), None, MenuAction::DisplayTimezone),
+                    menu::Item::Button(
+                        fl!("archived-calendars"),
+                        None,
+                        MenuAction::ArchivedCalendars,
+                    ),
+                    menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
+                    menu::Item::Divider,
                     menu::Item::Button(fl!("about"), None, MenuAction::About),
                 ],
             ),
-        )]);
+        )])
+        .item_height(menu::ItemHeight::Dynamic(40))
+        .item_width(menu::ItemWidth::Uniform(320))
+        .spacing(spacing().space_xxxs.into())
+        .window_id_maybe(self.core.main_window_id())
+        .on_surface_action(Message::MenuSurface);
 
         vec![menu_bar.into()]
     }
 
     fn header_center<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
-        if self.show_month() {
-            return Vec::new();
-        }
-
-        vec![
-            widget::text(format!(
-                "{} {}",
-                self.calendar.selected_date.month(),
-                self.calendar.selected_date.year()
-            ))
-            .into(),
-        ]
-    }
-
-    fn header_end<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
-        let width = if self.window_width > 0.0
-            && matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month))
-        {
-            (self.window_width / self.core.scale_factor() - 260.0).clamp(120.0, 240.0)
+        let width = if self.window_width > 0.0 {
+            (self.window_width / self.core.scale_factor() - 260.0).clamp(100.0, 240.0)
         } else {
             240.0
         };
@@ -393,16 +420,40 @@ impl cosmic::Application for AppModel {
         ]
     }
 
-    fn footer<'a>(&'a self) -> Option<Element<'a, Self::Message>> {
-        if self.show_month() {
-            return None;
-        }
-
+    fn header_end<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
+        let selected_slot = self.calendar.selected_slot.or_else(|| {
+            self.show_month()
+                .then(|| CalendarSlot::MonthDay(self.calendar.selected_date.date()))
+        });
+        let create_message = selected_slot
+            .map_or(Message::AddEvent(self.calendar.current_date), |slot| {
+                self.create_event_at_slot(slot)
+            });
         let today = widget::button::icon(widget::icon::from_name("calendar-go-today-symbolic"))
-            .tooltip(fl!("today"))
+            .name(fl!("today"))
             .class(cosmic::style::Button::NavToggle)
             .on_press_maybe((!self.calendar.today()).then_some(Message::NavigateToday));
+        let create_event = widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+            .name(fl!("create-event"))
+            .on_press(create_message);
 
+        vec![
+            widget::tooltip(
+                today,
+                widget::text(fl!("today")),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+            widget::tooltip(
+                create_event,
+                widget::text(fl!("create-event")),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+        ]
+    }
+
+    fn footer<'a>(&'a self) -> Option<Element<'a, Self::Message>> {
         let days = widget::row(vec![
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(Message::NavigatePreviousDay)
@@ -423,10 +474,14 @@ impl cosmic::Application for AppModel {
             widget::button::icon(widget::icon::from_name("go-next-symbolic"))
                 .on_press(Message::NavigateNextDay)
                 .into(),
-        ]);
+        ])
+        .align_y(Vertical::Center)
+        .spacing(spacing().space_xxs);
 
         let months = widget::row(vec![
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
+                .tooltip(fl!("previous-month"))
+                .name(fl!("previous-month"))
                 .on_press(Message::NavigatePreviousMonth)
                 .into(),
             widget::dropdown(
@@ -443,9 +498,13 @@ impl cosmic::Application for AppModel {
             )
             .into(),
             widget::button::icon(widget::icon::from_name("go-next-symbolic"))
+                .tooltip(fl!("next-month"))
+                .name(fl!("next-month"))
                 .on_press(Message::NavigateNextMonth)
                 .into(),
-        ]);
+        ])
+        .align_y(Vertical::Center)
+        .spacing(spacing().space_xxs);
 
         let years = widget::row(vec![
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
@@ -471,27 +530,14 @@ impl cosmic::Application for AppModel {
         .align_y(Vertical::Center)
         .spacing(spacing().space_xxs);
 
-        let create_event = widget::row(vec![
-            widget::button::icon(widget::icon::from_name("list-add-symbolic"))
-                .tooltip(fl!("create-event"))
-                .name(fl!("create-event"))
-                .on_press(Message::AddEvent(self.calendar.current_date))
-                .into(),
-        ])
-        .align_y(Vertical::Center)
-        .spacing(spacing().space_xxs);
-
         Some(
-            widget::container(widget::flex_row(vec![
-                today.into(),
-                widget::space::horizontal().into(),
-                days.into(),
-                months.into(),
-                years.into(),
-                widget::space::horizontal().into(),
-                create_event.into(),
-            ]))
-            .align_x(Horizontal::Center)
+            widget::container(
+                widget::flex_row(vec![days.into(), months.into(), years.into()])
+                    .width(Length::Fill)
+                    .justify_content(widget::JustifyContent::Center)
+                    .justify_items(Alignment::Center)
+                    .spacing(spacing().space_xs),
+            )
             .class(cosmic::theme::Container::Card)
             .padding(spacing().space_xxxs)
             .width(Length::Fill)
@@ -509,7 +555,7 @@ impl cosmic::Application for AppModel {
     /// `nav_bar`'s context menu implementation asserts that this yields
     /// exactly one entry (possibly empty) per nav item, in iteration order.
     fn nav_context_menu(&self) -> Option<Vec<menu::Tree<cosmic::Action<Self::Message>>>> {
-        let can_delete = self.storage.lock().unwrap().list_calendars().len() > 1;
+        let can_delete = !self.storage_read_only;
         let header_id = self.calendar_nav_ids.first().copied();
 
         Some(menu::nav_context(
@@ -525,7 +571,7 @@ impl cosmic::Application for AppModel {
                         )];
                         if can_delete {
                             items.push(menu::Item::Button(
-                                fl!("delete"),
+                                fl!("delete-calendar"),
                                 None,
                                 NavMenuAction::DeleteCalendar(calendar_id),
                             ));
@@ -560,29 +606,11 @@ impl cosmic::Application for AppModel {
                 )
                 .title(fl!("month-day-agenda"))
             }
-            ContextPage::DisplayTimezone => {
-                let value = self.display_timezone_input.trim();
-                let valid = value.is_empty() || value.parse::<chrono_tz::Tz>().is_ok();
-                let mut form = widget::column(Vec::new()).spacing(spacing().space_s).push(
-                    widget::text_input(
-                        fl!("display-timezone-placeholder"),
-                        &self.display_timezone_input,
-                    )
-                    .on_input(Message::DisplayTimezoneInput),
-                );
-                if !valid {
-                    form = form.push(widget::text::body(fl!("invalid-event-timezone")));
-                }
-                form = form.push(
-                    widget::button::suggested(fl!("save"))
-                        .on_press_maybe(valid.then_some(Message::ApplyDisplayTimezone)),
-                );
-                context_drawer::context_drawer(
-                    form,
-                    Message::ToggleContextPage(ContextPage::DisplayTimezone),
-                )
-                .title(fl!("display-timezone"))
-            }
+            ContextPage::Settings => context_drawer::context_drawer(
+                self.settings_view(),
+                Message::ToggleContextPage(ContextPage::Settings),
+            )
+            .title(fl!("settings")),
             ContextPage::IcsImport => context_drawer::context_drawer(
                 self.ics_import_view(),
                 Message::ToggleContextPage(ContextPage::IcsImport),
@@ -593,25 +621,52 @@ impl cosmic::Application for AppModel {
                 Message::ToggleContextPage(ContextPage::About),
             )
             .title(fl!("about")),
-            ContextPage::CalendarManager => context_drawer::context_drawer(
-                self.calendar_manager_view(),
-                Message::ToggleContextPage(ContextPage::CalendarManager),
+            ContextPage::ArchivedCalendars => context_drawer::context_drawer(
+                self.archived_calendars_view(),
+                Message::ToggleContextPage(ContextPage::ArchivedCalendars),
             )
-            .title(if self.calendar_manager.editing.is_some() {
-                fl!("edit-calendar")
-            } else {
-                fl!("new-calendar")
-            }),
+            .title(fl!("archived-calendars")),
         })
     }
 
-    /// Displays the event creation/editing form as a centered dialog rather
-    /// than a side drawer: it's a focused, modal task (unlike the calendar
-    /// manager or about page, which make sense alongside the calendar view).
+    /// Displays calendar creation, calendar deletion confirmation, or the event editor.
     fn dialog<'a>(&'a self) -> Option<Element<'a, Self::Message>> {
+        if let Some((_, name)) = &self.calendar_to_archive {
+            return Some(
+                widget::dialog::dialog()
+                    .title(fl!("delete-calendar"))
+                    .body(fl!("archive-calendar-confirmation", name = name.as_str()))
+                    .primary_action(widget::button::destructive(fl!("delete")).on_press_maybe(
+                        (!self.calendar_archive_busy).then_some(Message::ConfirmArchiveCalendar),
+                    ))
+                    .secondary_action(widget::button::standard(fl!("cancel")).on_press_maybe(
+                        (!self.calendar_archive_busy).then_some(Message::CancelArchiveCalendar),
+                    ))
+                    .width(Length::Fixed(420.0))
+                    .into(),
+            );
+        }
+        if let Some(form) = &self.calendar_form {
+            let (title, action) = if form.id.is_some() {
+                (fl!("edit-calendar"), fl!("save"))
+            } else {
+                (fl!("new-calendar"), fl!("create"))
+            };
+            return Some(widget::toaster(
+                &self.toasts,
+                widget::dialog::dialog()
+                    .title(title)
+                    .control(widget::scrollable(calendar_form::view(form)).width(Length::Fill))
+                    .primary_action(widget::button::suggested(action)
+                        .on_press_maybe(form.can_save().then_some(Message::SaveCalendarForm)))
+                    .secondary_action(widget::button::standard(fl!("cancel"))
+                        .on_press_maybe((!form.writing).then_some(Message::CloseCalendarForm)))
+                    .width(Length::Fixed(if form.picker.get_is_active() { 620.0 } else { 380.0 })),
+            ));
+        }
         self.editing_event
             .as_ref()
-            .map(|_| self.event_editor_view())
+            .map(|_| widget::toaster(&self.toasts, self.event_editor_view()))
     }
 
     /// Describes the interface based on the current state of the application model.
@@ -652,7 +707,12 @@ impl cosmic::Application for AppModel {
         };
 
         let content = widget::column(vec![tabs, active_tab]).spacing(spacing().space_xxs);
-        self.attach_calendar_popup(content, None)
+        let calendar = self.attach_calendar_popup(content, None);
+        if self.editing_event.is_some() || self.calendar_form.is_some() {
+            calendar
+        } else {
+            widget::toaster(&self.toasts, calendar)
+        }
     }
 
     /// Register subscriptions for this application.
@@ -708,19 +768,24 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         let mut tasks = vec![];
         match message {
+            Message::MenuSurface(action) => return cosmic::surface::surface_task(action),
             Message::CalendarEventClicked(key, anchor) => {
                 self.calendar.selected_event = Some(key);
+                self.calendar.selected_slot = None;
                 if self.calendar_double_click(CalendarClick::Event(key)) {
                     self.open_event_details(key, Some(anchor));
                 } else {
                     self.calendar_popup = None;
                 }
             }
-            Message::CalendarEmptySlotClicked(date) => {
-                self.calendar.selected_event = None;
+            Message::CalendarEmptySlotClicked(slot) => {
+                self.calendar.select_slot(slot);
                 self.calendar_popup = None;
-                if self.calendar_double_click(CalendarClick::EmptySlot(date)) {
-                    return self.update(Message::AddEvent(date));
+                if self.calendar_double_click(CalendarClick::EmptySlot(slot)) {
+                    return self.update(self.create_event_at_slot(slot));
+                }
+                if matches!(slot, CalendarSlot::MonthDay(_)) {
+                    self.open_day_agenda();
                 }
             }
             Message::CloseCalendarPopup => self.calendar_popup = None,
@@ -730,7 +795,7 @@ impl cosmic::Application for AppModel {
                 match action {
                     CalendarAction::Edit => {
                         if let Some((id, start)) = selection {
-                            return self.update(Message::OpenEventEditor(Some(id), start));
+                            return self.update(Message::OpenEventEditor(Some(id), start, false));
                         }
                     }
                     CalendarAction::Delete => {
@@ -787,16 +852,14 @@ impl cosmic::Application for AppModel {
                             match self.paste_occurrence(source, date) {
                                 Ok(key) => {
                                     self.calendar.selected_event = Some(key);
+                                    self.calendar.selected_slot = None;
                                     if cut {
                                         self.calendar_clipboard = None;
                                     }
                                 }
                                 Err(err) => {
                                     tracing::error!("failed to paste calendar event: {err}");
-                                    self.calendar_popup = Some(OpenCalendarPopup {
-                                        content: CalendarPopup::PasteError,
-                                        anchor: None,
-                                    });
+                                    tasks.push(self.toast(fl!("calendar-paste-error")));
                                 }
                             }
                         }
@@ -809,6 +872,7 @@ impl cosmic::Application for AppModel {
                 let changed = self.tabs.active() != tab;
                 self.tabs.activate(tab);
                 if changed {
+                    self.calendar.selected_slot = None;
                     tasks.push(self.scroll_calendar_to_now());
                 }
                 if self.context_page == ContextPage::DayAgenda
@@ -831,24 +895,46 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::UpdateConfig(config) => {
+                let theme_changed = self.config.app_theme != config.app_theme;
                 self.config = config;
                 self.refresh_display_timezone();
+                if theme_changed {
+                    tasks.push(cosmic::command::set_theme(self.config.app_theme.theme()));
+                }
             }
-            Message::DisplayTimezoneInput(value) => self.display_timezone_input = value,
-            Message::ApplyDisplayTimezone => {
-                let value = self.display_timezone_input.trim();
-                if value.is_empty() || value.parse::<chrono_tz::Tz>().is_ok() {
+            Message::SetTheme(app_theme) => {
+                if app_theme != self.config.app_theme {
                     let mut config = self.config.clone();
-                    config.display_timezone = value.to_string();
                     match cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-                        .and_then(|context| config.write_entry(&context))
+                        .and_then(|context| config.set_app_theme(&context, app_theme))
                     {
-                        Ok(()) => {
+                        Ok(_) => {
                             self.config = config;
-                            self.refresh_display_timezone();
-                            self.core.set_show_context(false);
+                            tasks.push(cosmic::command::set_theme(app_theme.theme()));
                         }
-                        Err(err) => tracing::error!("failed to save display time zone: {err}"),
+                        Err(err) => {
+                            tasks
+                                .push(self.toast(fl!("theme-save-error", error = err.to_string())));
+                        }
+                    }
+                }
+            }
+            Message::SetDisplayTimezone(index) => {
+                if let Some(option) = self.display_timezone_options.get(index) {
+                    let value = if index == 0 { String::new() } else { option.clone() };
+                    if value != self.config.display_timezone {
+                        let mut config = self.config.clone();
+                        match cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
+                            .and_then(|context| config.set_display_timezone(&context, value))
+                        {
+                            Ok(_) => {
+                                self.config = config;
+                                self.refresh_display_timezone();
+                            }
+                            Err(err) => tasks.push(
+                                self.toast(fl!("display-timezone-save-error", error = err.to_string())),
+                            ),
+                        }
                     }
                 }
             }
@@ -860,9 +946,11 @@ impl cosmic::Application for AppModel {
             },
             Message::AddEvent(date) => {
                 self.calendar_click = None;
-                tasks.push(cosmic::task::message(Message::OpenEventEditor(None, date)));
+                tasks.push(cosmic::task::message(Message::OpenEventEditor(
+                    None, date, false,
+                )));
             }
-            Message::OpenEventEditor(event_id, date) => {
+            Message::OpenEventEditor(event_id, date, all_day) => {
                 if self.editing_event.is_some() {
                     return Task::none();
                 }
@@ -891,6 +979,7 @@ impl cosmic::Application for AppModel {
                         return cosmic::task::message(Message::OpenNewCalendarForm);
                     };
                     let mut state = EventEditorState::new(calendar, date);
+                    state.all_day = all_day;
                     state.timezone = self
                         .calendar
                         .display_timezone
@@ -898,6 +987,7 @@ impl cosmic::Application for AppModel {
                         .unwrap_or_default();
                     state
                 };
+                self.calendar_click = None;
                 self.reminders_model = build_reminders_model(&state.reminders);
                 self.editing_event = Some(state);
             }
@@ -1123,7 +1213,6 @@ impl cosmic::Application for AppModel {
                     .filter(|state| !state.writing && state.validation_error().is_none())
                 {
                     state.writing = true;
-                    state.error = None;
                     let state = state.clone();
                     let storage = self.storage.clone();
                     tasks.push(Task::perform(
@@ -1180,9 +1269,9 @@ impl cosmic::Application for AppModel {
                 }
                 Err(err) => {
                     tracing::error!("failed to save event: {err}");
+                    tasks.push(self.toast(fl!("event-save-error")));
                     if let Some(state) = self.editing_event.as_mut() {
                         state.writing = false;
-                        state.error = Some(fl!("event-save-error"));
                     }
                 }
             },
@@ -1246,9 +1335,9 @@ impl cosmic::Application for AppModel {
                 }
                 Err(err) => {
                     tracing::error!("failed to delete event: {err}");
+                    tasks.push(self.toast(fl!("event-delete-error", error = err.as_str())));
                     if let Some(state) = self.editing_event.as_mut() {
                         state.writing = false;
-                        state.error = Some(fl!("event-delete-error"));
                     }
                 }
             },
@@ -1334,7 +1423,7 @@ impl cosmic::Application for AppModel {
                                         skipped += 1;
                                         continue;
                                     }
-                                    if storage.get_event(event.id).is_some() {
+                                    if storage.contains_event_id(event.id) {
                                         let original = event.id;
                                         event.id = EventId::new();
                                         resolved_series.insert(original, event.id);
@@ -1353,7 +1442,18 @@ impl cosmic::Application for AppModel {
             }
             Message::IcsImported(result) => {
                 self.ics_import.busy = false;
-                self.ics_import.result = Some(result);
+                if self.context_page == ContextPage::IcsImport {
+                    self.core.set_show_context(false);
+                }
+                let notice = match result {
+                    Ok((imported, skipped)) => fl!(
+                        "ics-import-result",
+                        imported = imported.to_string(),
+                        skipped = skipped.to_string()
+                    ),
+                    Err(error) => fl!("ics-import-error", error = error.as_str()),
+                };
+                tasks.push(self.toast(notice));
             }
             Message::ExportIcs => {
                 let storage = self.storage.clone();
@@ -1367,7 +1467,7 @@ impl cosmic::Application for AppModel {
                             Err(_) => None,
                         };
                         let Some(path) = path else {
-                            return Err("export cancelled".to_string());
+                            return Ok(None);
                         };
 
                         tokio::task::spawn_blocking(move || {
@@ -1375,7 +1475,7 @@ impl cosmic::Application for AppModel {
                             let events: Vec<Event> = storage.events_for_export().cloned().collect();
                             let calendar = ics::export_events(&events);
                             std::fs::write(&path, calendar)
-                                .map(|()| path)
+                                .map(|()| Some(path))
                                 .map_err(|err| err.to_string())
                         })
                         .await
@@ -1385,104 +1485,131 @@ impl cosmic::Application for AppModel {
                 ));
             }
             Message::IcsExported(result) => match result {
-                Ok(path) => tracing::info!("exported calendar to {}", path.display()),
-                Err(err) => tracing::error!("failed to export ICS file: {err}"),
+                Ok(Some(path)) => tracing::info!("exported calendar to {}", path.display()),
+                Ok(None) => {}
+                Err(err) => {
+                    tasks.push(self.toast(fl!("calendar-export-error", error = err.as_str())))
+                }
             },
             Message::OpenNewCalendarForm => {
-                self.calendar_manager = CalendarManagerState::default();
-                self.context_page = ContextPage::CalendarManager;
-                self.core.window.show_context = true;
-            }
-            Message::CalendarManagerNewNameChanged(value) => {
-                self.calendar_manager.new_name = value;
-            }
-            Message::CreateCalendar => {
-                let name = self.calendar_manager.new_name.trim().to_string();
-                if !name.is_empty() {
-                    let storage = self.storage.clone();
-                    tasks.push(Task::perform(
-                        async move {
-                            tokio::task::spawn_blocking(move || {
-                                let meta = LocalCalendarMeta {
-                                    id: CalendarId::new(),
-                                    name,
-                                    description: None,
-                                    color: None,
-                                    visible: true,
-                                };
-                                let mut storage = storage.lock().unwrap();
-                                storage.create_calendar(meta.clone()).map(|()| meta)
-                            })
-                            .await
-                            .map_err(|err| err.to_string())?
-                            .map_err(|err| err.to_string())
-                        },
-                        |result| cosmic::action::app(Message::CalendarCreated(result)),
-                    ));
+                if self.calendar_form.as_ref().is_some_and(|form| form.writing) {
+                    return Task::none();
                 }
+                self.calendar_form = Some(CalendarForm::new(None, String::new(), None));
             }
-            Message::CalendarCreated(result) => match result {
-                Ok(_meta) => {
-                    self.calendar_manager.new_name.clear();
-                    self.core.window.show_context = false;
-                    self.refresh_calendar_nav();
-                }
-                Err(err) => tracing::error!("failed to create calendar: {err}"),
-            },
             Message::StartEditCalendar(id) => {
+                if self.calendar_form.as_ref().is_some_and(|form| form.writing) {
+                    return Task::none();
+                }
                 if let Some(meta) = self.storage.lock().unwrap().get_calendar(id) {
-                    self.calendar_manager.editing = Some(CalendarEditState {
-                        id,
-                        name: meta.name.clone(),
-                        color: meta.color.clone().unwrap_or_default(),
-                    });
-                    self.context_page = ContextPage::CalendarManager;
-                    self.core.window.show_context = true;
+                    self.calendar_form =
+                        Some(CalendarForm::new(Some(id), meta.name.clone(), meta.color.clone()));
                 }
             }
-            Message::CalendarEditNameChanged(value) => {
-                if let Some(editing) = self.calendar_manager.editing.as_mut() {
-                    editing.name = value;
+            Message::CalendarNameChanged(name) => {
+                if let Some(form) = self.calendar_form.as_mut().filter(|form| !form.writing) {
+                    form.name = name;
                 }
             }
-            Message::CalendarEditColorChanged(value) => {
-                if let Some(editing) = self.calendar_manager.editing.as_mut() {
-                    editing.color = value;
+            Message::SetCalendarColor(color) => {
+                if let Some(form) = self.calendar_form.as_mut().filter(|form| !form.writing) {
+                    form.picker = CalendarForm::color_picker(color.as_deref());
+                    form.color = color;
                 }
             }
-            Message::SaveCalendarEdit => {
-                if let Some(editing) = self.calendar_manager.editing.clone() {
+            Message::CalendarColorPicker(update) => {
+                if let Some(form) = self.calendar_form.as_mut().filter(|form| !form.writing) {
+                    match update {
+                        // Keep the picker open during slider and text input interactions.
+                        ColorPickerUpdate::ActionFinished => {}
+                        ColorPickerUpdate::Cancel => {
+                            form.picker = CalendarForm::color_picker(form.color.as_deref());
+                        }
+                        ColorPickerUpdate::ToggleColorPicker if form.picker.get_is_active() => {
+                            form.picker = CalendarForm::color_picker(form.color.as_deref());
+                        }
+                        update => {
+                            use cosmic::cosmic_theme::palette::{FromColor, Srgb};
+                            let color = match &update {
+                                ColorPickerUpdate::ActiveColor(hsv) => {
+                                    Some(cosmic::iced::Color::from(Srgb::from_color(*hsv)))
+                                }
+                                ColorPickerUpdate::Input(value) => {
+                                    value.parse::<css_color::Srgb>().ok().map(|rgb| {
+                                        cosmic::iced::Color::from_rgb(rgb.red, rgb.green, rgb.blue)
+                                    })
+                                }
+                                _ => None,
+                            };
+                            if let Some(color) = color {
+                                let [r, g, b, _] = color.into_rgba8();
+                                form.color = Some(format!("#{r:02x}{g:02x}{b:02x}"));
+                            }
+                            tasks.push(
+                                form.picker.update::<Message>(update).map(cosmic::action::app),
+                            );
+                        }
+                    }
+                }
+            }
+            Message::SaveCalendarForm => {
+                if let Some(form) = self.calendar_form.as_mut().filter(|form| form.can_save()) {
+                    form.writing = true;
+                    let id = form.id;
+                    let name = form.name.trim().to_owned();
+                    let color = form.color.clone();
                     let storage = self.storage.clone();
                     tasks.push(Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
                                 let mut storage = storage.lock().unwrap();
-                                let Some(mut meta) = storage.get_calendar(editing.id).cloned()
-                                else {
-                                    return Err("calendar not found".to_string());
+                                let mut meta = if let Some(id) = id {
+                                    storage.get_calendar(id).cloned().ok_or("calendar not found")?
+                                } else {
+                                    LocalCalendarMeta {
+                                        id: CalendarId::new(),
+                                        name: String::new(),
+                                        description: None,
+                                        color: None,
+                                        visible: true,
+                                        archived: false,
+                                    }
                                 };
-                                meta.name = editing.name;
-                                meta.color = (!editing.color.is_empty()).then_some(editing.color);
+                                meta.name = name;
+                                meta.color = color;
                                 storage.update_calendar(meta).map_err(|err| err.to_string())
                             })
                             .await
                             .map_err(|err| err.to_string())?
                         },
-                        |result| cosmic::action::app(Message::CalendarEditSaved(result)),
+                        |result| cosmic::action::app(Message::CalendarFormSaved(result)),
                     ));
                 }
             }
-            Message::CalendarEditSaved(result) => match result {
-                Ok(()) => {
-                    self.calendar_manager.editing = None;
-                    self.core.window.show_context = false;
-                    self.refresh_calendar_nav();
+            Message::CalendarFormSaved(result) => {
+                if let Some(form) = self.calendar_form.as_mut() {
+                    form.writing = false;
+                    let editing = form.id.is_some();
+                    match result {
+                        Ok(()) => {
+                            self.calendar_form = None;
+                            self.refresh_calendar_nav();
+                        }
+                        Err(err) => {
+                            let notice = if editing {
+                                fl!("calendar-save-error", error = err.as_str())
+                            } else {
+                                fl!("calendar-create-error", error = err.as_str())
+                            };
+                            tasks.push(self.toast(notice));
+                        }
+                    }
                 }
-                Err(err) => tracing::error!("failed to save calendar: {err}"),
-            },
-            Message::CancelCalendarEdit => {
-                self.calendar_manager.editing = None;
-                self.core.window.show_context = false;
+            }
+            Message::CloseCalendarForm => {
+                if self.calendar_form.as_ref().is_some_and(|form| !form.writing) {
+                    self.calendar_form = None;
+                }
             }
             Message::ToggleCalendarVisibility(id, visible) => {
                 let storage = self.storage.clone();
@@ -1504,29 +1631,71 @@ impl cosmic::Application for AppModel {
             }
             Message::CalendarVisibilityToggled(result) => match result {
                 Ok(()) => self.refresh_calendar_nav(),
-                Err(err) => tracing::error!("failed to toggle calendar visibility: {err}"),
+                Err(err) => {
+                    tasks.push(self.toast(fl!("calendar-visibility-error", error = err.as_str())))
+                }
             },
             Message::DeleteCalendar(id) => {
-                let storage = self.storage.clone();
-                tasks.push(Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            let mut storage = storage.lock().unwrap();
-                            storage
-                                .delete_calendar(id)
-                                .map(|()| id)
-                                .map_err(|err| err.to_string())
-                        })
-                        .await
-                        .map_err(|err| err.to_string())?
-                    },
-                    |result| cosmic::action::app(Message::CalendarDeleted(result)),
-                ));
+                if self.editing_event.is_none() && !self.calendar_archive_busy {
+                    let storage = self.storage.lock().unwrap();
+                    self.calendar_to_archive =
+                        storage.get_calendar(id).map(|meta| (id, meta.name.clone()));
+                    self.calendar_popup = None;
+                }
             }
-            Message::CalendarDeleted(result) => match result {
-                Ok(_id) => self.refresh_calendar_nav(),
-                Err(err) => tracing::error!("failed to delete calendar: {err}"),
-            },
+            Message::CancelArchiveCalendar => {
+                if !self.calendar_archive_busy {
+                    self.calendar_to_archive = None;
+                }
+            }
+            Message::ConfirmArchiveCalendar | Message::RestoreCalendar(_) => {
+                let archive = matches!(message, Message::ConfirmArchiveCalendar);
+                let id = match message {
+                    Message::RestoreCalendar(id) if self.calendar_to_archive.is_none() => Some(id),
+                    Message::ConfirmArchiveCalendar => {
+                        self.calendar_to_archive.as_ref().map(|(id, _)| *id)
+                    }
+                    _ => None,
+                };
+                if let Some(id) = id.filter(|_| !self.calendar_archive_busy) {
+                    self.calendar_archive_busy = true;
+                    let storage = self.storage.clone();
+                    tasks.push(Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                let mut storage = storage.lock().unwrap();
+                                if archive {
+                                    storage.archive_calendar(id)
+                                } else {
+                                    storage.restore_calendar(id)
+                                }
+                            })
+                            .await
+                            .map_err(|err| err.to_string())?
+                            .map_err(|err| err.to_string())
+                        },
+                        |result| cosmic::action::app(Message::CalendarArchiveChanged(result)),
+                    ));
+                }
+            }
+            Message::CalendarArchiveChanged(result) => {
+                self.calendar_archive_busy = false;
+                let archived = self.calendar_to_archive.take().is_some();
+                match result {
+                    Ok(()) => {
+                        self.calendar.selected_event = None;
+                        self.calendar_popup = None;
+                        self.refresh_calendar_nav();
+                        if archived {
+                            tasks.push(self.toast(fl!("calendar-archived")));
+                        }
+                    }
+                    Err(err) => {
+                        tasks.push(self.toast(fl!("calendar-archive-error", error = err.as_str())))
+                    }
+                }
+            }
+            Message::CloseToast(id) => self.toasts.remove(id),
             Message::SearchChanged(query) => {
                 let returning_to_calendar = !self.search_query.is_empty() && query.is_empty();
                 self.search_query = query;
@@ -1613,9 +1782,7 @@ impl cosmic::Application for AppModel {
             Message::ShowDayAgenda(date) => {
                 self.calendar
                     .set_date(self.calendar.selected_date.replace_date(date));
-                self.context_page = ContextPage::DayAgenda;
-                self.update_drawer_layout();
-                self.core.set_show_context(true);
+                self.open_day_agenda();
             }
             Message::CloseDayAgenda => {
                 if self.context_page == ContextPage::DayAgenda && self.core.window.show_context {
@@ -1642,19 +1809,21 @@ impl cosmic::Application for AppModel {
             Message::SelectMonth(idx) => {
                 let months = self.calendar.months();
                 let month = months.index(idx);
-                if let Ok(date) = self.calendar.selected_date.replace_month(*month) {
-                    self.calendar.set_date(date);
-                } else {
-                    tracing::error!("failed to select date");
+                if let Err(err) = self
+                    .calendar
+                    .select_month_of_year(self.calendar.selected_date.year(), *month)
+                {
+                    tracing::error!("failed to select month: {err}");
                 }
             }
             Message::SelectYear(idx) => {
                 let years = self.calendar.years();
                 let year = years.index(idx);
-                if let Ok(date) = self.calendar.selected_date.replace_year(*year) {
-                    self.calendar.set_date(date);
-                } else {
-                    tracing::error!("failed to select date");
+                if let Err(err) = self
+                    .calendar
+                    .select_month_of_year(*year, self.calendar.selected_date.month())
+                {
+                    tracing::error!("failed to select year: {err}");
                 }
             }
             Message::NavigateToday => {
@@ -1696,6 +1865,14 @@ impl cosmic::Application for AppModel {
         Task::batch(tasks)
     }
 
+    fn system_theme_update(
+        &mut self,
+        _keys: &[&'static str],
+        _new_theme: &cosmic_theme::Theme,
+    ) -> Task<cosmic::Action<Message>> {
+        cosmic::command::set_theme(self.config.app_theme.theme())
+    }
+
     fn on_window_resize(&mut self, id: cosmic::iced::window::Id, width: f32, _height: f32) {
         if self.core.main_window_is(id) {
             self.window_width = width;
@@ -1704,16 +1881,29 @@ impl cosmic::Application for AppModel {
     }
 
     fn on_escape(&mut self) -> Task<cosmic::Action<Self::Message>> {
+        if self.calendar_to_archive.is_some() {
+            return cosmic::task::message(Message::CancelArchiveCalendar);
+        }
+        if let Some(form) = &self.calendar_form {
+            let message = if form.picker.get_is_active() {
+                Message::CalendarColorPicker(ColorPickerUpdate::Cancel)
+            } else {
+                Message::CloseCalendarForm
+            };
+            return cosmic::task::message(message);
+        }
         if self.calendar_popup.take().is_some() {
             return Task::none();
         }
-        if self.context_page == ContextPage::DayAgenda
-            && self.core.window.show_context
-            && self.editing_event.is_none()
-        {
-            cosmic::task::message(Message::CloseDayAgenda)
-        } else {
-            Task::none()
+        if !self.core.window.show_context || self.editing_event.is_some() {
+            return Task::none();
+        }
+        match self.context_page {
+            ContextPage::DayAgenda => cosmic::task::message(Message::CloseDayAgenda),
+            ContextPage::Settings => {
+                cosmic::task::message(Message::ToggleContextPage(ContextPage::Settings))
+            }
+            _ => Task::none(),
         }
     }
 
@@ -1732,14 +1922,29 @@ impl cosmic::Application for AppModel {
             return cosmic::task::message(Message::ToggleCalendarVisibility(calendar_id, visible));
         }
 
-        // Activate the page in the model.
-        self.nav.activate(id);
-
-        self.update_title()
+        if self.calendar_nav_ids.first() == Some(&id) {
+            self.calendars_collapsed = !self.calendars_collapsed;
+            self.refresh_calendar_nav();
+        }
+        Task::none()
     }
 }
 
 impl AppModel {
+    fn toast(&mut self, message: String) -> Task<cosmic::Action<Message>> {
+        self.toasts
+            .push(widget::Toast::new(message))
+            .map(cosmic::action::app)
+    }
+
+    fn create_event_at_slot(&self, slot: CalendarSlot) -> Message {
+        Message::OpenEventEditor(
+            None,
+            slot.start(self.calendar.selected_date.offset()),
+            matches!(slot, CalendarSlot::AllDay(_)),
+        )
+    }
+
     fn scroll_calendar_to_now(&self) -> Task<cosmic::Action<Message>> {
         if self.search_query.is_empty() {
             match self.tabs.active_data::<Tab>() {
@@ -1887,13 +2092,6 @@ impl AppModel {
                     Message::CalendarAction(CalendarAction::Edit, Some(*key), start),
                 ));
             }
-            CalendarPopup::PasteError => {
-                content = content
-                    .push(widget::text::body(fl!("calendar-paste-error")))
-                    .push(
-                        widget::button::text(fl!("cancel")).on_press(Message::CloseCalendarPopup),
-                    );
-            }
         }
         widget::container(content)
             .width(Length::Fixed(240.0))
@@ -2004,8 +2202,13 @@ impl AppModel {
             return false;
         };
         state.writing = true;
-        state.error = None;
         true
+    }
+
+    fn open_day_agenda(&mut self) {
+        self.context_page = ContextPage::DayAgenda;
+        self.update_drawer_layout();
+        self.core.set_show_context(true);
     }
 
     fn update_drawer_layout(&mut self) {
@@ -2023,19 +2226,6 @@ impl AppModel {
     }
 
     fn ics_import_view(&self) -> Element<'_, Message> {
-        if let Some(result) = &self.ics_import.result {
-            return match result {
-                Ok((imported, skipped)) => widget::text::body(fl!(
-                    "ics-import-result",
-                    imported = imported.to_string(),
-                    skipped = skipped.to_string()
-                ))
-                .into(),
-                Err(error) => {
-                    widget::text::body(fl!("ics-import-error", error = error.as_str())).into()
-                }
-            };
-        }
         if self.ics_import.busy {
             return widget::text::body(fl!("ics-import-working")).into();
         }
@@ -2077,6 +2267,39 @@ impl AppModel {
                     .on_press_maybe(selected.map(|_| Message::ConfirmIcsImport)),
             )
             .into()
+    }
+
+    fn settings_view(&self) -> Element<'_, Message> {
+        let selected_zone = self.display_timezone_options[1..]
+            .iter()
+            .position(|zone| zone == &self.config.display_timezone)
+            .map_or(0, |index| index + 1);
+        let zone_dropdown = widget::dropdown(
+            self.display_timezone_options.as_slice(),
+            Some(selected_zone),
+            Message::SetDisplayTimezone,
+        );
+        let section = widget::settings::section()
+            .title(fl!("settings-date-and-time"))
+            .add(
+                widget::settings::item::builder(fl!("display-timezone"))
+                    .control(widget::container(zone_dropdown).max_width(210)),
+            );
+
+        let appearance = widget::settings::section().title(fl!("appearance")).add(
+            widget::settings::item::builder(fl!("theme")).control(widget::dropdown(
+                vec![
+                    fl!("theme-match-desktop"),
+                    fl!("theme-dark"),
+                    fl!("theme-light"),
+                ],
+                AppTheme::OPTIONS
+                    .iter()
+                    .position(|&theme| theme == self.config.app_theme),
+                |index| Message::SetTheme(AppTheme::OPTIONS[index]),
+            )),
+        );
+        widget::settings::view_column(vec![appearance.into(), section.into()]).into()
     }
 
     fn refresh_display_timezone(&mut self) {
@@ -2147,48 +2370,70 @@ impl AppModel {
             self.nav.remove(id);
         }
 
-        let calendars: Vec<(CalendarId, String, bool)> = {
+        let calendars = {
             let storage = self.storage.lock().unwrap();
             let mut metas = storage.list_calendars();
             metas.sort_by(|a, b| a.name.cmp(&b.name));
             metas
                 .into_iter()
-                .map(|meta| (meta.id, meta.name.clone(), meta.visible))
-                .collect()
+                .cloned()
+                .collect::<Vec<_>>()
         };
-
-        if calendars.is_empty() {
-            return;
-        }
 
         let mut new_ids = Vec::with_capacity(calendars.len() + 1);
 
         self.nav
             .insert()
             .text(fl!("calendars"))
+            .icon(widget::icon::from_name(if self.calendars_collapsed {
+                "pan-end-symbolic"
+            } else {
+                "pan-down-symbolic"
+            }))
             .with_id(|id| new_ids.push(id));
 
-        for (id, name, visible) in calendars {
-            let icon = if visible {
-                "checkbox-checked-symbolic"
-            } else {
-                "checkbox-symbolic"
-            };
+        if self.calendars_collapsed {
+            self.calendar_nav_ids = new_ids;
+            return;
+        }
+
+        for calendar in calendars {
+            let color = calendar.color.as_deref().and_then(calendar_color);
+            let icon = calendar_form::sidebar_color_icon(color, calendar.visible);
             self.nav
                 .insert()
                 .indent(1)
-                .text(name)
-                .icon(widget::icon::from_name(icon))
-                .data(id)
+                .text(calendar.name)
+                .icon(icon)
+                .data(calendar.id)
                 .with_id(|entity| new_ids.push(entity));
         }
 
         self.calendar_nav_ids = new_ids;
     }
 
-    /// The calendar creation/rename form for the context drawer.
-    pub fn calendar_manager_view<'a>(&'a self) -> Element<'a, Message> {
-        crate::features::calendar_management::view::view(&self.calendar_manager)
+    fn archived_calendars_view(&self) -> Element<'_, Message> {
+        let storage = self.storage.lock().unwrap();
+        let mut calendars = storage.archived_calendars();
+        calendars.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
+        if calendars.is_empty() {
+            return widget::text::body(fl!("no-archived-calendars")).into();
+        }
+        let mut content = widget::column(Vec::new()).spacing(spacing().space_s);
+        for calendar in calendars {
+            content = content.push(
+                widget::row(Vec::new())
+                    .spacing(spacing().space_s)
+                    .push(widget::text::body(calendar.name.clone()).width(Length::Fill))
+                    .push(
+                        widget::button::standard(fl!("restore-calendar")).on_press_maybe(
+                            (!self.calendar_archive_busy && !self.storage_read_only)
+                                .then_some(Message::RestoreCalendar(calendar.id)),
+                        ),
+                    ),
+            );
+        }
+        widget::scrollable(content).into()
     }
 
     /// The list of events matching `self.search_query`, shown in place of
@@ -2258,18 +2503,20 @@ pub enum Tab {
 pub enum ContextPage {
     #[default]
     About,
-    CalendarManager,
+    ArchivedCalendars,
     DayAgenda,
-    DisplayTimezone,
+    Settings,
     IcsImport,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    NewCalendar,
     About,
-    DisplayTimezone,
+    Settings,
     ImportIcs,
     ExportIcs,
+    ArchivedCalendars,
 }
 
 impl menu::action::MenuAction for MenuAction {
@@ -2277,10 +2524,14 @@ impl menu::action::MenuAction for MenuAction {
 
     fn message(&self) -> Self::Message {
         match self {
-            MenuAction::DisplayTimezone => Message::ToggleContextPage(ContextPage::DisplayTimezone),
+            MenuAction::NewCalendar => Message::OpenNewCalendarForm,
+            MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::ImportIcs => Message::ImportIcs,
             MenuAction::ExportIcs => Message::ExportIcs,
+            MenuAction::ArchivedCalendars => {
+                Message::ToggleContextPage(ContextPage::ArchivedCalendars)
+            }
         }
     }
 }

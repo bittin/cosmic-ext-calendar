@@ -1,34 +1,24 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 
 use crate::shared::ids::{CalendarId, EventId};
 
-fn project_dirs() -> ProjectDirs {
+pub fn data_dir() -> crate::Result<PathBuf> {
     ProjectDirs::from("dev", "edfloreshz", "Calendar")
-        .expect("failed to determine a home directory for local storage")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .ok_or_else(|| {
+            crate::Error::Storage("could not determine the calendar data directory".into())
+        })
 }
 
-pub fn data_dir() -> PathBuf {
-    project_dirs().data_dir().to_path_buf()
+pub fn calendar_path(root: &Path, calendar_id: &CalendarId) -> PathBuf {
+    root.join("calendars")
+        .join(format!("{}.json", calendar_id.0))
 }
 
-pub fn calendars_dir() -> PathBuf {
-    data_dir().join("calendars")
-}
-
-pub fn calendar_path(calendar_id: &CalendarId) -> PathBuf {
-    calendars_dir().join(format!("{}.json", calendar_id.0))
-}
-
-pub fn events_dir(calendar_id: &CalendarId) -> PathBuf {
-    data_dir().join("events").join(calendar_id.0.to_string())
-}
-
-pub fn event_path(calendar_id: &CalendarId, event_id: &EventId) -> PathBuf {
-    events_dir(calendar_id).join(format!("{}.json", event_id.0))
-}
-
-pub fn index_path() -> PathBuf {
-    data_dir().join("index.json")
+pub fn event_path(root: &Path, calendar_id: &CalendarId, event_id: &EventId) -> PathBuf {
+    root.join("events")
+        .join(calendar_id.0.to_string())
+        .join(format!("{}.json", event_id.0))
 }

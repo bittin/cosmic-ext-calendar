@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 
 use time::OffsetDateTime;
 
-use crate::features::calendar_management::model::CalendarKey;
 use crate::features::event::{model::Event, resolve_series_occurrence};
 use crate::shared::ids::EventId;
 
@@ -12,7 +11,6 @@ use crate::shared::ids::EventId;
 #[derive(Default)]
 pub struct EventIndex {
     by_id: HashMap<EventId, Event>,
-    by_calendar: BTreeMap<CalendarKey, Vec<EventId>>,
     by_start: BTreeMap<OffsetDateTime, Vec<EventId>>,
 }
 
@@ -20,12 +18,10 @@ impl EventIndex {
     pub fn upsert(&mut self, event: Event) {
         self.remove(event.id);
 
-        let calendar = event.calendar.clone();
         let start = event_sort_key(&event);
         let id = event.id;
 
         self.by_id.insert(id, event);
-        self.by_calendar.entry(calendar).or_default().push(id);
         self.by_start.entry(start).or_default().push(id);
     }
 
@@ -34,9 +30,6 @@ impl EventIndex {
             return;
         };
 
-        if let Some(ids) = self.by_calendar.get_mut(&existing.calendar) {
-            ids.retain(|other| *other != id);
-        }
         let start = event_sort_key(&existing);
         if let Some(ids) = self.by_start.get_mut(&start) {
             ids.retain(|other| *other != id);
@@ -45,15 +38,6 @@ impl EventIndex {
 
     pub fn get(&self, id: EventId) -> Option<&Event> {
         self.by_id.get(&id)
-    }
-
-    pub fn events_for_calendar(&self, calendar: &CalendarKey) -> Vec<&Event> {
-        self.by_calendar
-            .get(calendar)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| self.by_id.get(id))
-            .collect()
     }
 
     pub fn all_records(&self) -> impl Iterator<Item = &Event> + Clone {

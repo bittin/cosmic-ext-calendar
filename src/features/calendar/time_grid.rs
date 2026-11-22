@@ -3,8 +3,7 @@ use cosmic::{
     iced::{
         Background, Length, Task,
         alignment::Horizontal,
-        mouse::Interaction,
-        widget::{Id, mouse_area, scrollable, stack, text::Wrapping},
+        widget::{Id, scrollable, stack, text::Wrapping},
     },
     style::Button,
     theme::spacing,
@@ -12,7 +11,10 @@ use cosmic::{
 };
 use time::{Duration, OffsetDateTime, Time};
 
-use super::{CalendarAnchor, Occurrence, event_card_style, event_target, month, paste_target};
+use super::{
+    event_card_style, event_target, month, slot_style, slot_target, CalendarAnchor, CalendarSlot,
+    Occurrence,
+};
 use crate::app::{AppModel, Message};
 
 const HALF_HOUR_SLOTS: u8 = 48;
@@ -56,6 +58,7 @@ pub(super) fn view<'a>(
     label_width: u16,
     slot_height: f32,
     events: &[Occurrence],
+    selected: Option<CalendarSlot>,
     app: &'a AppModel,
 ) -> Element<'a, Message> {
     let show_half_hours = days == 1;
@@ -83,7 +86,7 @@ pub(super) fn view<'a>(
         let date = first + Duration::days(i64::from(day));
         grid = grid
             .push(widget::divider::vertical::default())
-            .push(day_column(date, slot_height, events, app));
+            .push(day_column(date, slot_height, events, selected, app));
     }
     grid.width(Length::Fill)
         .height(slot_height * f32::from(HALF_HOUR_SLOTS))
@@ -102,26 +105,25 @@ fn day_column<'a>(
     date: OffsetDateTime,
     slot_height: f32,
     events: &[Occurrence],
+    selected: Option<CalendarSlot>,
     app: &'a AppModel,
 ) -> Element<'a, Message> {
     let mut slots = widget::column(Vec::new()).width(Length::Fill);
     for slot in 0..HALF_HOUR_SLOTS {
         let hour = slot / 2;
         let minute = slot % 2 * 30;
-        let start = date.replace_time(Time::from_hms(hour, minute, 0).unwrap());
+        let cell = CalendarSlot::Timed(date.date(), Time::from_hms(hour, minute, 0).unwrap());
         slots = slots.push(
             widget::column(Vec::new())
                 .push(slot_divider(slot))
-                .push(paste_target(
+                .push(slot_target(
                     app,
-                    mouse_area(
-                        widget::Space::new()
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                    )
-                    .interaction(Interaction::Idle)
-                    .on_release(Message::CalendarEmptySlotClicked(start)),
-                    start,
+                    widget::container(widget::space::vertical())
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .class(slot_style(selected == Some(cell))),
+                    cell,
+                    date.offset(),
                 ))
                 .height(slot_height)
                 .width(Length::Fill),

@@ -80,7 +80,6 @@ pub struct EventEditorState {
     pub end: OffsetDateTime,
     pub timezone: String,
     pub floating: bool,
-    pub error: Option<String>,
     pub writing: bool,
     pub recurrence: RecurrenceRule,
     /// Minutes-before-start lead times for each reminder attached to this
@@ -203,7 +202,6 @@ impl EventEditorState {
             end: start + time::Duration::hours(1),
             timezone: String::new(),
             floating: false,
-            error: None,
             writing: false,
             recurrence: RecurrenceRule::NONE,
             reminders: Vec::new(),
@@ -237,7 +235,6 @@ impl EventEditorState {
             end,
             timezone: event.timezone.clone().unwrap_or_default(),
             floating: event.floating,
-            error: None,
             writing: false,
             recurrence: editor_recurrence(event),
             reminders: event

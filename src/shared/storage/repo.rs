@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use tracing::warn;
@@ -16,6 +16,8 @@ use crate::Result;
 /// The local, file-backed store for calendars and events created in this
 /// app.
 pub struct LocalStorage {
+    root: PathBuf,
+    load_error: Option<String>,
     index: EventIndex,
     event_files: HashMap<EventId, PathBuf>,
     duplicate_files: HashMap<EventId, Vec<PathBuf>>,
@@ -23,11 +25,10 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
-    /// An empty store, used as a fallback when [`Self::load`] fails (e.g. the
-    /// data directory is inaccessible), mirroring how a corrupt app config
-    /// falls back to `Config::default()` today.
-    pub fn empty() -> Self {
+    pub fn unavailable(error: String) -> Self {
         Self {
+            root: PathBuf::new(),
+            load_error: Some(error),
             index: EventIndex::default(),
             event_files: HashMap::new(),
             duplicate_files: HashMap::new(),
@@ -35,57 +36,72 @@ impl LocalStorage {
         }
     }
 
-    /// Loads all calendars and events from disk, skipping (and logging) any
-    /// individual file that fails to parse rather than failing the whole
-    /// load — a single corrupt event shouldn't take down the app.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        match self.load_error() {
+            Some(error) => Err(crate::Error::Storage(error.into())),
+            None => Ok(()),
+        }
+    }
+
     pub fn load() -> Result<Self> {
+        Self::load_from(paths::data_dir()?)
+    }
+
+    fn load_from(root: PathBuf) -> Result<Self> {
+        let mut load_error = None;
         let mut calendars = HashMap::new();
-        for entry in read_dir_json(&paths::calendars_dir())? {
+        for entry in read_dir_json(&root.join("calendars"))? {
             match load_calendar_file(&entry) {
                 Ok(meta) => {
                     calendars.insert(meta.id, meta);
                 }
-                Err(err) => warn!("failed to load calendar {entry:?}: {err}"),
+                Err(err) => record_load_error(&mut load_error, &entry, err),
             }
         }
 
         let mut index = EventIndex::default();
         let mut event_files = HashMap::new();
         let mut duplicate_files: HashMap<EventId, Vec<PathBuf>> = HashMap::new();
-        let events_root = paths::data_dir().join("events");
-        if events_root.is_dir() {
-            let calendar_dirs = std::fs::read_dir(&events_root)?;
-            for calendar_dir in calendar_dirs.flatten() {
-                let path = calendar_dir.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                for entry in read_dir_json(&path)? {
-                    match load_event_file(&entry) {
-                        Ok(event) => {
-                            if let Some(previous) = index.get(event.id) {
-                                if (
-                                    previous.sequence,
-                                    previous.updated_at,
-                                    &event_files[&event.id],
-                                ) >= (event.sequence, event.updated_at, &entry)
-                                {
-                                    duplicate_files.entry(event.id).or_default().push(entry);
-                                    continue;
-                                }
+        for calendar_dir in read_dir_if_present(&root.join("events"))?
+            .into_iter()
+            .flatten()
+        {
+            let calendar_dir = calendar_dir?;
+            if !std::fs::metadata(calendar_dir.path())?.is_dir() {
+                continue;
+            }
+            let path = calendar_dir.path();
+            for entry in read_dir_json(&path)? {
+                match load_event_file(&entry) {
+                    Ok(event) => {
+                        if let Some(previous) = index.get(event.id) {
+                            if (
+                                previous.sequence,
+                                previous.updated_at,
+                                &event_files[&event.id],
+                            ) >= (event.sequence, event.updated_at, &entry)
+                            {
+                                duplicate_files.entry(event.id).or_default().push(entry);
+                                continue;
                             }
-                            if let Some(old_path) = event_files.insert(event.id, entry) {
-                                duplicate_files.entry(event.id).or_default().push(old_path);
-                            }
-                            index.upsert(event);
                         }
-                        Err(err) => warn!("failed to load event {entry:?}: {err}"),
+                        if let Some(old_path) = event_files.insert(event.id, entry) {
+                            duplicate_files.entry(event.id).or_default().push(old_path);
+                        }
+                        index.upsert(event);
                     }
+                    Err(err) => record_load_error(&mut load_error, &entry, err),
                 }
             }
         }
 
         let mut storage = Self {
+            root,
+            load_error,
             index,
             event_files,
             duplicate_files,
@@ -112,16 +128,24 @@ impl LocalStorage {
 
     // -- Calendars --------------------------------------------------------
 
+    pub fn has_calendars(&self) -> bool {
+        !self.calendars.is_empty()
+    }
+
     pub fn list_calendars(&self) -> Vec<&LocalCalendarMeta> {
-        self.calendars.values().collect()
+        self.calendars
+            .values()
+            .filter(|meta| !meta.archived)
+            .collect()
     }
 
     pub fn get_calendar(&self, id: CalendarId) -> Option<&LocalCalendarMeta> {
-        self.calendars.get(&id)
+        self.calendars.get(&id).filter(|meta| !meta.archived)
     }
 
     pub fn create_calendar(&mut self, meta: LocalCalendarMeta) -> Result<()> {
-        let path = paths::calendar_path(&meta.id);
+        self.ensure_writable()?;
+        let path = paths::calendar_path(&self.root, &meta.id);
         let wrapped = migration::wrap(CURRENT_CALENDAR_SCHEMA_VERSION, &meta)?;
         atomic::write_json_atomic(&path, &wrapped)?;
         self.calendars.insert(meta.id, meta);
@@ -132,36 +156,58 @@ impl LocalStorage {
         self.create_calendar(meta)
     }
 
-    pub fn delete_calendar(&mut self, id: CalendarId) -> Result<()> {
-        let calendar = CalendarKey::Local(id);
-        let event_ids: Vec<EventId> = self
-            .index
-            .events_for_calendar(&calendar)
-            .into_iter()
-            .map(|event| event.id)
-            .collect();
-        for event_id in event_ids {
-            self.delete_event(event_id)?;
-        }
+    pub fn archived_calendars(&self) -> Vec<&LocalCalendarMeta> {
+        self.calendars
+            .values()
+            .filter(|meta| meta.archived)
+            .collect()
+    }
 
-        let calendar_path = paths::calendar_path(&id);
-        if calendar_path.is_file() {
-            std::fs::remove_file(&calendar_path)?;
+    pub fn archive_calendar(&mut self, id: CalendarId) -> Result<()> {
+        let mut meta = self
+            .get_calendar(id)
+            .cloned()
+            .ok_or_else(|| crate::Error::Storage("active calendar not found".into()))?;
+        meta.archived = true;
+        self.update_calendar(meta)
+    }
+
+    pub fn restore_calendar(&mut self, id: CalendarId) -> Result<()> {
+        let mut meta = self
+            .calendars
+            .get(&id)
+            .filter(|meta| meta.archived)
+            .cloned()
+            .ok_or_else(|| crate::Error::Storage("archived calendar not found".into()))?;
+        meta.archived = false;
+        self.update_calendar(meta)
+    }
+
+    fn event_is_active(&self, event: &Event) -> bool {
+        match event.calendar {
+            CalendarKey::Local(id) => !self.calendars.get(&id).is_some_and(|meta| meta.archived),
+            CalendarKey::Remote { .. } => true,
         }
-        self.calendars.remove(&id);
-        Ok(())
     }
 
     // -- Events -------------------------------------------------------------
 
     pub fn get_event(&self, id: EventId) -> Option<&Event> {
-        self.index.get(id)
+        self.index
+            .get(id)
+            .filter(|event| self.event_is_active(event))
     }
 
-    /// All events currently in storage, regardless of date — used for ICS
-    /// export.
+    pub fn contains_event_id(&self, id: EventId) -> bool {
+        self.index.get(id).is_some()
+    }
+
+    /// Events in active calendars, regardless of date.
     pub fn all_events(&self) -> Vec<&Event> {
-        self.index.all().collect()
+        self.index
+            .all()
+            .filter(|event| self.event_is_active(event))
+            .collect()
     }
 
     /// Include truncated predecessors so the exporter can resolve moved
@@ -175,19 +221,34 @@ impl LocalStorage {
                         .recurrence_cutoff()
                         .is_some_and(|end| end <= event.first_possible_occurrence())
             }))
+            .filter(|event| self.event_is_active(event))
     }
 
     pub fn search(&self, query: &str) -> Vec<&Event> {
-        self.index.search(query)
+        self.index
+            .search(query)
+            .into_iter()
+            .filter(|event| self.event_is_active(event))
+            .collect()
     }
 
     pub fn create_event(&mut self, event: Event) -> Result<()> {
+        self.ensure_writable()?;
+        if self
+            .index
+            .get(event.id)
+            .is_some_and(|existing| !self.event_is_active(existing))
+        {
+            return Err(crate::Error::Storage(
+                "event belongs to an archived calendar".into(),
+            ));
+        }
         if let CalendarKey::Local(calendar_id) = &event.calendar {
             let already_assigned = self
                 .index
                 .get(event.id)
                 .is_some_and(|existing| existing.calendar == event.calendar);
-            if !already_assigned && !self.calendars.contains_key(calendar_id) {
+            if !already_assigned && self.get_calendar(*calendar_id).is_none() {
                 return Err(crate::Error::Storage(
                     "destination calendar no longer exists".into(),
                 ));
@@ -199,7 +260,7 @@ impl LocalStorage {
                 .event_files
                 .get(&event.id)
                 .cloned()
-                .unwrap_or_else(|| paths::event_path(calendar_id, &event.id));
+                .unwrap_or_else(|| paths::event_path(&self.root, calendar_id, &event.id));
             let wrapped = migration::wrap(CURRENT_EVENT_SCHEMA_VERSION, &event)?;
             atomic::write_json_atomic(&path, &wrapped)?;
             self.event_files.insert(event.id, path);
@@ -243,29 +304,9 @@ impl LocalStorage {
     }
 
     pub fn delete_event(&mut self, id: EventId) -> Result<()> {
-        if let Some((series, occurrence)) = self.index.get(id).and_then(|event| event.predecessor) {
-            if let Some(mut parent) = self.index.get(series).cloned() {
-                parent.repeat_before = Some(
-                    parent
-                        .repeat_before
-                        .map_or(occurrence, |cutoff| cutoff.min(occurrence)),
-                );
-                self.update_event(parent)?;
-            }
-        }
-        if let Some((series, occurrence)) = self
-            .index
-            .get(id)
-            .and_then(|event| event.series_id.zip(event.recurrence_id))
-        {
-            let (owner, slot) =
-                resolve_series_occurrence(series, occurrence, self.index.all_records());
-            if let Some(mut parent) = self.index.get(owner).cloned() {
-                if !parent.exdates.contains(&slot) {
-                    parent.exdates.push(slot);
-                }
-                self.update_event(parent)?;
-            }
+        self.ensure_writable()?;
+        if self.get_event(id).is_none() {
+            return Err(crate::Error::Storage("active event not found".into()));
         }
         let mut successors = std::collections::HashSet::from([id]);
         loop {
@@ -299,6 +340,39 @@ impl LocalStorage {
                 ))
             })
             .collect();
+        if overrides
+            .iter()
+            .any(|(event, _, _)| !self.event_is_active(event))
+        {
+            return Err(crate::Error::Storage(
+                "restore the calendar containing the related occurrence before deleting this event"
+                    .into(),
+            ));
+        }
+        if let Some((series, occurrence)) = self.index.get(id).and_then(|event| event.predecessor) {
+            if let Some(mut parent) = self.index.get(series).cloned() {
+                parent.repeat_before = Some(
+                    parent
+                        .repeat_before
+                        .map_or(occurrence, |cutoff| cutoff.min(occurrence)),
+                );
+                self.update_event(parent)?;
+            }
+        }
+        if let Some((series, occurrence)) = self
+            .index
+            .get(id)
+            .and_then(|event| event.series_id.zip(event.recurrence_id))
+        {
+            let (owner, slot) =
+                resolve_series_occurrence(series, occurrence, self.index.all_records());
+            if let Some(mut parent) = self.index.get(owner).cloned() {
+                if !parent.exdates.contains(&slot) {
+                    parent.exdates.push(slot);
+                }
+                self.update_event(parent)?;
+            }
+        }
         for (mut replacement, owner, slot) in overrides {
             if owner == id {
                 self.remove_event_file(replacement.id)?;
@@ -340,12 +414,23 @@ impl LocalStorage {
     }
 }
 
-fn read_dir_json(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
-    if !dir.is_dir() {
-        return Ok(Vec::new());
+fn record_load_error(first_error: &mut Option<String>, path: &Path, error: crate::Error) {
+    let message = format!("{}: {error}", path.display());
+    warn!("failed to load calendar data: {message}");
+    first_error.get_or_insert(message);
+}
+
+fn read_dir_if_present(dir: &Path) -> Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(crate::Error::Storage(format!("{}: {err}", dir.display()))),
     }
+}
+
+fn read_dir_json(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
+    for entry in read_dir_if_present(dir)?.into_iter().flatten() {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "json") {
@@ -365,4 +450,41 @@ fn load_event_file(path: &std::path::Path) -> Result<Event> {
     let bytes = std::fs::read(path)?;
     let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
     migration::unwrap_current(raw, CURRENT_EVENT_SCHEMA_VERSION, "Event")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archiving_the_only_calendar_preserves_the_empty_active_list_on_reload() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("cosmic-calendar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let result = (|| {
+            let mut storage = LocalStorage::load_from(root.clone())?;
+            assert!(!storage.has_calendars());
+
+            let id = CalendarId::new();
+            storage.create_calendar(LocalCalendarMeta {
+                id,
+                name: "Personal".into(),
+                description: None,
+                color: None,
+                visible: true,
+                archived: false,
+            })?;
+            storage.archive_calendar(id)?;
+
+            let mut storage = LocalStorage::load_from(root.clone())?;
+            assert!(storage.has_calendars());
+            assert!(storage.list_calendars().is_empty());
+            assert_eq!(storage.archived_calendars()[0].id, id);
+
+            storage.restore_calendar(id)?;
+            assert!(storage.get_calendar(id).is_some());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
 }

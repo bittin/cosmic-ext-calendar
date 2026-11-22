@@ -4,12 +4,12 @@ use cosmic::{
     theme::{Container, spacing},
     widget,
 };
-use time::{Date, Duration, Month, OffsetDateTime, Time, Weekday};
+use time::{Date, Duration, Month, OffsetDateTime, Weekday};
 
 use crate::{
     app::{AppModel, Message},
     features::{
-        calendar_management::model::{CalendarKey, LocalCalendarMeta},
+        calendar_management::model::{CalendarKey, LocalCalendarMeta, calendar_color},
         event::model::{Event, EventTime},
     },
     fl,
@@ -17,14 +17,15 @@ use crate::{
 };
 
 use super::{
-    CalendarAnchor, EventSelection, LocalCalendar, display_time, event_button_style,
-    event_card_style, event_target, paste_target,
+    display_time, event_button_style, event_card_style, event_target, slot_target,
+    CalendarAnchor, CalendarSlot, EventSelection, LocalCalendar,
 };
 
 const DAYS_PER_WEEK: usize = 7;
 const EVENT_ROWS: usize = 2;
 const EVENT_HEIGHT: f32 = 20.0;
 const COMPACT_WIDTH: f32 = 520.0;
+const WEEKDAY_ROW_HEIGHT: f32 = 28.0;
 
 pub(super) struct Occurrence {
     id: EventId,
@@ -162,19 +163,6 @@ fn occurrences_with_calendars<'a>(
     items
 }
 
-fn calendar_color(value: &str) -> Option<Color> {
-    let hex = value.strip_prefix('#')?;
-    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let rgb = u32::from_str_radix(hex, 16).ok()?;
-    Some(Color::from_rgb8(
-        (rgb >> 16) as u8,
-        (rgb >> 8) as u8,
-        rgb as u8,
-    ))
-}
-
 pub(super) fn month_view<'a>(
     calendar: LocalCalendar,
     storage: &LocalStorage,
@@ -198,34 +186,13 @@ pub(super) fn month_view<'a>(
 
     widget::responsive(move |size| {
         let compact = size.width < COMPACT_WIDTH;
-        let week_height = ((size.height - 94.0 - (weeks - 1) as f32) / weeks as f32)
-            .max(if compact { 52.0 } else { 91.0 });
-        let date = calendar
-            .selected_date
-            .replace_time(Time::from_hms(9, 0, 0).unwrap());
-        let date = date.replace_offset(display_time(date, calendar.display_timezone).offset());
-        let header = widget::row(vec![
-            widget::text::title3(month_title(selected)).into(),
-            widget::space::horizontal().into(),
-            widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
-                .tooltip(fl!("previous-month"))
-                .on_press(Message::NavigatePreviousMonth)
-                .into(),
-            widget::button::text(fl!("today"))
-                .class(cosmic::style::Button::Text)
-                .on_press(Message::NavigateToday)
-                .into(),
-            widget::button::icon(widget::icon::from_name("go-next-symbolic"))
-                .tooltip(fl!("next-month"))
-                .on_press(Message::NavigateNextMonth)
-                .into(),
-            widget::button::icon(widget::icon::from_name("list-add-symbolic"))
-                .tooltip(fl!("new-event"))
-                .on_press(Message::AddEvent(date))
-                .into(),
-        ])
-        .align_y(Vertical::Center);
-
+        let padding = spacing().space_xxs;
+        let grid_height = size.height - WEEKDAY_ROW_HEIGHT - 2.0 * f32::from(padding);
+        let week_height = ((grid_height - (weeks - 1) as f32) / weeks as f32).max(if compact {
+            52.0
+        } else {
+            91.0
+        });
         let weekdays = widget::row::with_children(
             [
                 Weekday::Monday,
@@ -240,7 +207,7 @@ pub(super) fn month_view<'a>(
             .map(|day| {
                 widget::container(widget::text::caption(weekday_name(day)))
                     .center_x(Length::Fill)
-                    .padding(4)
+                    .center_y(WEEKDAY_ROW_HEIGHT)
                     .into()
             })
             .collect::<Vec<_>>(),
@@ -261,20 +228,14 @@ pub(super) fn month_view<'a>(
         }
 
         widget::column::with_children(vec![
-            header.into(),
             weekdays.into(),
             widget::scrollable(grid)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into(),
         ])
-        .spacing(spacing().space_xxs)
-        .padding([
-            0,
-            spacing().space_xxs,
-            spacing().space_xxs,
-            spacing().space_xxs,
-        ])
+        .spacing(padding)
+        .padding([0, padding, padding, padding])
         .height(Length::Fill)
         .into()
     })
@@ -356,7 +317,7 @@ fn week_view<'a>(
     for (day, (count, hidden)) in counts.into_iter().zip(hidden).enumerate() {
         let date = first + Duration::days(day as i64);
         let outside = date.month() != selected.month();
-        backgrounds = backgrounds.push(paste_target(
+        backgrounds = backgrounds.push(slot_target(
             app,
             widget::container(widget::space::vertical())
                 .width(Length::Fill)
@@ -383,14 +344,10 @@ fn week_view<'a>(
                         ..Default::default()
                     }
                 })),
-            date.with_hms(9, 0, 0).unwrap().assume_utc(),
+            CalendarSlot::MonthDay(date),
+            time::UtcOffset::UTC,
         ));
 
-        let marker: Element<'_, Message> = if compact && count > 0 {
-            color_dot(None)
-        } else {
-            widget::space::horizontal().width(4).into()
-        };
         let number = widget::text::body(date.day().to_string()).class(if outside {
             cosmic::style::Text::Custom(|theme| {
                 let surface = theme.current_container();
@@ -419,56 +376,43 @@ fn week_view<'a>(
         } else {
             number
         };
-        let day_button = widget::button::custom(
-            widget::row(vec![number.into(), marker])
-                .spacing(4)
-                .align_y(Vertical::Center),
-        )
-        .id(day_id(date))
-        .name(fl!(
-            "month-day-accessible",
-            date = agenda_date(date),
-            count = count
-        ))
-        .width(Length::Fill)
-        .padding([2, 5])
-        .height(if compact { 44.0 } else { 26.0 })
-        .class(cosmic::style::Button::Text)
-        .on_press(Message::ShowDayAgenda(date));
-        let day_button = paste_target(
-            app,
-            day_button,
-            date.with_hms(9, 0, 0).unwrap().assume_utc(),
-        );
-        let day_button = if let Some(anchor) = app.compact_month_anchor(date, compact) {
-            app.attach_calendar_popup(day_button, Some(anchor))
-        } else {
-            day_button
-        };
         dates = dates.push(
-            widget::container(day_button)
-                .padding([2, 3])
+            widget::container(number)
+                .height(26)
+                .align_y(Vertical::Center)
+                .padding([0, 5])
                 .width(Length::Fill),
         );
 
-        if !compact {
-            let control: Element<'_, Message> = if hidden > 0 {
-                widget::button::text(fl!("month-more-events", count = hidden))
-                    .width(Length::Fill)
-                    .height(EVENT_HEIGHT)
-                    .padding([0, 4])
-                    .class(cosmic::style::Button::Text)
-                    .on_press(Message::ShowDayAgenda(date))
-                    .into()
+        let overflow_count = if compact { count } else { hidden };
+        let control: Element<'_, Message> = if overflow_count > 0 {
+            let label = if compact {
+                fl!("month-compact-event-count", count = overflow_count)
             } else {
-                widget::space::horizontal().width(Length::Fill).into()
+                fl!("month-more-events", count = overflow_count)
             };
-            overflow = overflow.push(
-                widget::container(control)
-                    .padding([0, 3])
-                    .width(Length::Fill),
-            );
-        }
+            widget::button::text(label)
+                .id(day_id(date))
+                .name(fl!("month-day-accessible", date = agenda_date(date), count = count))
+                .width(Length::Fill)
+                .height(EVENT_HEIGHT)
+                .padding([0, 4])
+                .class(cosmic::style::Button::Text)
+                .on_press(Message::ShowDayAgenda(date))
+                .into()
+        } else {
+            widget::space::horizontal().width(Length::Fill).into()
+        };
+        let control = if let Some(anchor) = app.compact_month_anchor(date, compact) {
+            app.attach_calendar_popup(control, Some(anchor))
+        } else {
+            control
+        };
+        overflow = overflow.push(
+            widget::container(control)
+                .padding([0, 3])
+                .width(Length::Fill),
+        );
     }
 
     let mut foreground = widget::column(Vec::new()).push(dates);
@@ -504,9 +448,7 @@ fn week_view<'a>(
         }
         foreground = foreground.push(row);
     }
-    if !compact {
-        foreground = foreground.push(overflow);
-    }
+    foreground = foreground.push(overflow);
 
     cosmic::iced::widget::stack(vec![backgrounds.into(), foreground.into()])
         .width(Length::Fill)
@@ -647,14 +589,6 @@ pub(super) fn blend(base: Color, accent: Color, amount: f32) -> Color {
     )
 }
 
-fn month_title(date: Date) -> String {
-    fl!(
-        "month-heading",
-        month = month_name(date.month()),
-        year = date.year().to_string()
-    )
-}
-
 pub(super) fn agenda_date(date: Date) -> String {
     fl!(
         "month-agenda-date",
@@ -709,6 +643,7 @@ mod tests {
             description: None,
             color: Some("#3caa86".into()),
             visible: true,
+            archived: false,
         };
         let mut event = EventEditorState::new(
             CalendarKey::Local(calendar.id),

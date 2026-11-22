@@ -403,10 +403,6 @@ pub fn view<'a>(
         )
         .width(Length::Fixed(640.0));
 
-    if let Some(error) = &state.error {
-        dialog = dialog.body(error.clone());
-    }
-
     if let Some(event_id) = state.event_id {
         let (label, action) = if state.recurring_series {
             match state.recurrence_scope {

@@ -969,6 +969,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "css-color",
  "directories",
  "i18n-embed 0.15.4",
  "i18n-embed-fl 0.9.4",

@@ -12,6 +12,7 @@ vergen = { version = "8", features = ["git", "gitcl"] }
 [dependencies]
 chrono = "0.4"
 chrono-tz = "0.10"
+css-color = "0.2.8"
 directories = "5"
 iana-time-zone = "0.1"
 i18n-embed-fl = "0.9.2"

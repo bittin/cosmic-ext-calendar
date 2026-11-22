@@ -1,3 +1,4 @@
+use cosmic::iced::Color;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -9,10 +10,7 @@ pub enum Source {
     /// Created and stored only in this app.
     Local,
     /// Backed by a remote account.
-    Synced {
-        provider: String,
-        account_id: Uuid,
-    },
+    Synced { provider: String, account_id: Uuid },
 }
 
 /// The current on-disk shape of a [`LocalCalendarMeta`]. Bump when the
@@ -31,6 +29,8 @@ pub struct LocalCalendarMeta {
     pub color: Option<String>,
     /// Whether events on this calendar should currently be shown.
     pub visible: bool,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// A common key that [`crate::features::event::model::Event`] uses to reference its parent
@@ -44,4 +44,17 @@ pub enum CalendarKey {
         /// The calendar ID assigned by the provider.
         calendar_id: String,
     },
+}
+
+pub fn calendar_color(value: &str) -> Option<Color> {
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let rgb = u32::from_str_radix(hex, 16).ok()?;
+    Some(Color::from_rgb8(
+        (rgb >> 16) as u8,
+        (rgb >> 8) as u8,
+        rgb as u8,
+    ))
 }

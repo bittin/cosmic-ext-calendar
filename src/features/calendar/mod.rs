@@ -6,7 +6,10 @@ use cosmic::style::Button;
 use cosmic::widget::{button, menu};
 use cosmic::{
     Element,
-    iced::{Length, widget::text::Wrapping},
+    iced::{
+        widget::{mouse_area, text::Wrapping},
+        Length,
+    },
     theme::spacing,
     widget,
 };
@@ -35,6 +38,30 @@ pub(crate) fn display_time(date: OffsetDateTime, zone: Option<chrono_tz::Tz>) ->
 use month::Occurrence;
 
 pub(crate) type EventSelection = (crate::shared::ids::EventId, OffsetDateTime);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarSlot {
+    MonthDay(Date),
+    AllDay(Date),
+    Timed(Date, Time),
+}
+
+impl CalendarSlot {
+    pub fn date(self) -> Date {
+        match self {
+            Self::MonthDay(date) | Self::AllDay(date) | Self::Timed(date, _) => date,
+        }
+    }
+
+    pub fn start(self, offset: UtcOffset) -> OffsetDateTime {
+        let time = match self {
+            Self::MonthDay(_) => Time::from_hms(9, 0, 0).unwrap(),
+            Self::AllDay(_) => Time::MIDNIGHT,
+            Self::Timed(_, time) => time,
+        };
+        self.date().with_time(time).assume_offset(offset)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CalendarAnchor {
@@ -143,14 +170,54 @@ fn paste_target<'a>(
     context_menu(button, items)
 }
 
-fn all_day_cell<'a>(date: Date, items: &[Occurrence], app: &'a AppModel) -> Element<'a, Message> {
+fn slot_target<'a>(
+    app: &'a AppModel,
+    content: impl Into<Element<'a, Message>>,
+    slot: CalendarSlot,
+    offset: UtcOffset,
+) -> Element<'a, Message> {
+    paste_target(
+        app,
+        mouse_area(content).on_release(Message::CalendarEmptySlotClicked(slot)),
+        slot.start(offset),
+    )
+}
+
+fn slot_style(selected: bool) -> cosmic::theme::Container<'static> {
+    cosmic::theme::Container::custom(move |theme| {
+        let background = selected.then(|| {
+            month::blend(
+                theme.current_container().base.into(),
+                theme.cosmic().accent_text_color().into(),
+                0.13,
+            )
+            .into()
+        });
+        cosmic::iced::widget::container::Style {
+            background,
+            ..Default::default()
+        }
+    })
+}
+
+fn all_day_cell<'a>(
+    date: Date,
+    items: &[Occurrence],
+    selected: Option<CalendarSlot>,
+    app: &'a AppModel,
+) -> Element<'a, Message> {
+    let slot = CalendarSlot::AllDay(date);
     let mut column = widget::column(Vec::new())
         .width(Length::Fill)
         .spacing(spacing().space_xxxs);
-    for item in items
+    let mut all_day = items
         .iter()
         .filter(|item| item.time.is_none() && item.first <= date && date <= item.last)
-    {
+        .peekable();
+    if all_day.peek().is_none() {
+        column = column.push(widget::space::vertical().height(20));
+    }
+    for item in all_day {
         let anchor = CalendarAnchor::AllDay(date, item.key());
         let mut content = widget::column(Vec::new())
             .push(widget::text::caption_heading(item.title.clone()).wrapping(Wrapping::None));
@@ -177,7 +244,12 @@ fn all_day_cell<'a>(date: Date, items: &[Occurrence], app: &'a AppModel) -> Elem
             anchor,
         ));
     }
-    column.into()
+    let cell = widget::container(column)
+        .width(Length::Fill)
+        .class(slot_style(selected == Some(slot)));
+    mouse_area(cell)
+        .on_release(Message::CalendarEmptySlotClicked(slot))
+        .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +258,7 @@ pub struct LocalCalendar {
     pub selected_date: OffsetDateTime,
     pub display_timezone: Option<chrono_tz::Tz>,
     pub selected_event: Option<EventSelection>,
+    pub selected_slot: Option<CalendarSlot>,
 }
 
 impl Default for LocalCalendar {
@@ -202,6 +275,7 @@ impl Default for LocalCalendar {
             selected_date: current_date,
             display_timezone: None,
             selected_event: None,
+            selected_slot: None,
         }
     }
 }
@@ -214,6 +288,7 @@ impl LocalCalendar {
             selected_date: current_date,
             display_timezone: None,
             selected_event: None,
+            selected_slot: None,
         }
     }
 
@@ -277,6 +352,7 @@ impl LocalCalendar {
             week::TIME_COLUMN_WIDTH,
             time_grid::WEEK_SLOT_HEIGHT,
             &items,
+            self.selected_slot,
             app,
         );
         let all_day = (0..7).fold(
@@ -284,7 +360,14 @@ impl LocalCalendar {
                 widget::container(widget::text::caption(crate::fl!("all-day")))
                     .width(week::TIME_COLUMN_WIDTH),
             ),
-            |row, day| row.push(all_day_cell(first + Duration::days(day), &items, app)),
+            |row, day| {
+                row.push(all_day_cell(
+                    first + Duration::days(day),
+                    &items,
+                    self.selected_slot,
+                    app,
+                ))
+            },
         );
 
         widget::column(Vec::new())
@@ -318,11 +401,14 @@ impl LocalCalendar {
             100,
             time_grid::DAY_SLOT_HEIGHT,
             &items,
+            self.selected_slot,
             app,
         );
         let all_day = widget::row(Vec::new())
             .push(widget::text::caption(crate::fl!("all-day")).width(100))
-            .push(all_day_cell(date, &items, app));
+            .push(all_day_cell(date, &items, self.selected_slot, app))
+            .align_y(cosmic::iced::Alignment::Center)
+            .padding([spacing().space_xxs, 0]);
 
         widget::column(Vec::new())
             .push(all_day)
@@ -340,7 +426,7 @@ impl LocalCalendar {
     }
 
     pub fn set_today(&mut self) {
-        self.selected_date = self.current_date;
+        self.set_date(self.current_date);
     }
 
     pub fn next_day(&mut self) -> Result<()> {
@@ -348,7 +434,7 @@ impl LocalCalendar {
             .selected_date
             .checked_add(time::Duration::days(1))
             .ok_or_else(|| crate::Error::DateCalculation("Failed to calculate next day".into()))?;
-        self.selected_date = new_date;
+        self.set_date(new_date);
         Ok(())
     }
 
@@ -359,7 +445,7 @@ impl LocalCalendar {
             .ok_or_else(|| {
                 crate::Error::DateCalculation("Failed to calculate previous day".into())
             })?;
-        self.selected_date = new_date;
+        self.set_date(new_date);
         Ok(())
     }
 
@@ -376,33 +462,37 @@ impl LocalCalendar {
         let month_index = i32::from(u8::from(date.month())) - 1 + delta;
         let year = date.year() + month_index.div_euclid(12);
         let month = Month::try_from((month_index.rem_euclid(12) + 1) as u8)?;
-        let day = date.day().min(month.length(year));
-        self.selected_date = self
-            .selected_date
-            .replace_date(time::Date::from_calendar_date(year, month, day)?);
+        self.select_month_of_year(year, month)
+    }
+
+    pub fn select_month_of_year(&mut self, year: i32, month: Month) -> Result<()> {
+        let day = self.selected_date.day().min(month.length(year));
+        let date = Date::from_calendar_date(year, month, day)?;
+        self.set_date(self.selected_date.replace_date(date));
         Ok(())
     }
 
     pub fn next_year(&mut self) -> Result<()> {
-        let next_year = self.selected_date.year();
-        let new_date = self.selected_date.replace_year(next_year + 1)?;
-        self.selected_date = new_date;
-        Ok(())
+        self.select_month_of_year(self.selected_date.year() + 1, self.selected_date.month())
     }
 
     pub fn previous_year(&mut self) -> Result<()> {
-        let next_year = self.selected_date.year();
-        let new_date = self.selected_date.replace_year(next_year - 1)?;
-        self.selected_date = new_date;
-        Ok(())
+        self.select_month_of_year(self.selected_date.year() - 1, self.selected_date.month())
     }
 
     pub fn today(&self) -> bool {
         self.selected_date.date() == self.current_date.date()
     }
 
+    pub fn select_slot(&mut self, slot: CalendarSlot) {
+        self.set_date(self.selected_date.replace_date(slot.date()));
+        self.selected_slot = Some(slot);
+        self.selected_event = None;
+    }
+
     pub fn set_date(&mut self, date: OffsetDateTime) {
         self.selected_date = date;
+        self.selected_slot = None;
     }
 
     pub fn months(&self) -> [Month; 12] {
@@ -437,5 +527,34 @@ impl LocalCalendar {
             days.push(day);
         }
         days
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selecting_an_empty_slot_clears_event_selection_and_tracks_the_clicked_date() {
+        let now = Date::from_calendar_date(2024, Month::February, 28)
+            .unwrap()
+            .midnight()
+            .assume_utc();
+        let mut calendar = LocalCalendar::new(now);
+        calendar.selected_event = Some((crate::shared::ids::EventId::new(), now));
+        let date = now.date().next_day().unwrap();
+        let slot = CalendarSlot::Timed(date, Time::from_hms(14, 30, 0).unwrap());
+
+        calendar.select_slot(slot);
+        assert_eq!(calendar.selected_date.date(), date);
+        assert_eq!(calendar.selected_slot, Some(slot));
+        assert!(calendar.selected_event.is_none());
+
+        calendar.next_year().unwrap();
+        assert_eq!(
+            calendar.selected_date.to_calendar_date(),
+            (2025, Month::February, 28)
+        );
+        assert!(calendar.selected_slot.is_none());
     }
 }
