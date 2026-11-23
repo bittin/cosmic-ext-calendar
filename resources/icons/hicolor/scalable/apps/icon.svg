@@ -1,27 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
-    <linearGradient id="cover" x1="12" y1="24" x2="116" y2="59" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#087e8c"/>
-      <stop offset="1" stop-color="#35b1bb"/>
-    </linearGradient>
-    <linearGradient id="paper" x1="18" y1="48" x2="110" y2="110" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#f8fcfc"/>
-      <stop offset="1" stop-color="#cde7e9"/>
-    </linearGradient>
     <linearGradient id="today" x1="55" y1="83" x2="73" y2="99" gradientUnits="userSpaceOnUse">
       <stop stop-color="#ffb35c"/>
       <stop offset="1" stop-color="#ed7a3e"/>
     </linearGradient>
   </defs>
-  <rect x="12" y="23" width="104" height="93" rx="13" fill="#175762"/>
-  <path fill="url(#paper)" d="M12 44h104v56a11 11 0 0 1-11 11H23a11 11 0 0 1-11-11Z"/>
-  <path fill="url(#cover)" d="M25 22h78a13 13 0 0 1 13 13v14H12V35a13 13 0 0 1 13-13Z"/>
+  <path fill="#e7f2f3" d="M12 44h104v59a13 13 0 0 1-13 13H25a13 13 0 0 1-13-13Z"/>
+  <path fill="#239ba6" d="M25 22h78a13 13 0 0 1 13 13v14H12V35a13 13 0 0 1 13-13Z"/>
   <path fill="#086876" opacity=".43" d="M12 47h104v2H12Z"/>
   <rect x="33" y="28" width="16" height="10" rx="5" fill="#12636e"/>
   <rect x="79" y="28" width="16" height="10" rx="5" fill="#12636e"/>
   <rect x="37" y="12" width="8" height="22" rx="4" fill="#314b5b"/>
   <rect x="83" y="12" width="8" height="22" rx="4" fill="#314b5b"/>
-  <path d="M39 16h4m42 0h4" stroke="#8bb9c3" stroke-width="2" stroke-linecap="round"/>
   <g fill="#78aeb6">
     <rect x="31" y="60" width="18" height="15" rx="4"/>
     <rect x="55" y="60" width="18" height="15" rx="4"/>
