@@ -6,7 +6,7 @@ use crate::features::calendar_management::{state::CalendarForm, view as calendar
 use crate::features::event::location::{LocationSuggestions, OnlinePlaces, PUBLIC_PHOTON_ENDPOINT, find_online, photon_api_url};
 use crate::features::event::model::{Event, EventTime};
 use crate::features::event::recurrence::{RecurrenceEnd, RecurrenceFreq};
-use crate::features::event::state::{EventDateField, EventEditorState, RecurrenceScope};
+use crate::features::event::state::{AlertDraft, EventDateField, EventEditorState, RecurrenceScope};
 use crate::features::ics;
 use crate::fl;
 use crate::shared::config::{AppTheme, Config};
@@ -218,11 +218,9 @@ pub enum Message {
     CloseToast(widget::ToastId),
     SearchChanged(String),
     SelectSearchResult(EventId, OffsetDateTime),
-    AddEventReminder(i64),
-    RemoveEventReminder(i64),
-    ToggleEventReminderOptions,
-    EventEditorCustomReminderInputChanged(String),
-    EventEditorAddCustomReminder,
+    SetEventAlert(usize, Option<i64>),
+    EditCustomEventAlert(usize, String),
+    RemoveEventAlert(usize),
     CheckReminders,
     RemindersFired(Vec<ReminderKey>),
 }
@@ -1759,37 +1757,22 @@ impl cosmic::Application for AppModel {
                 self.calendar.selected_event = Some((id, start));
                 self.open_event_details((id, start), None);
             }
-            Message::AddEventReminder(minutes) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if !state.reminders.contains(&minutes) {
-                        state.reminders.push(minutes);
+            Message::SetEventAlert(row, choice) => {
+                if let Some(state) = self.editing_event.as_mut().filter(|state| !state.writing) {
+                    state.set_alert(row, choice);
+                }
+            }
+            Message::EditCustomEventAlert(row, value) => {
+                if let Some(state) = self.editing_event.as_mut().filter(|state| !state.writing) {
+                    if let Some(AlertDraft::Custom(input)) = state.alerts.get_mut(row) {
+                        *input = value;
                     }
-                    state.adding_reminder = false;
                 }
             }
-            Message::RemoveEventReminder(minutes) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    state.reminders.retain(|value| *value != minutes);
-                }
-            }
-            Message::ToggleEventReminderOptions => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    state.adding_reminder = !state.adding_reminder;
-                }
-            }
-            Message::EventEditorCustomReminderInputChanged(value) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    state.custom_reminder_input = value;
-                }
-            }
-            Message::EventEditorAddCustomReminder => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if let Ok(minutes) = state.custom_reminder_input.trim().parse::<i64>() {
-                        if minutes >= 0 && !state.reminders.contains(&minutes) {
-                            state.reminders.push(minutes);
-                            state.custom_reminder_input.clear();
-                            state.adding_reminder = false;
-                        }
+            Message::RemoveEventAlert(row) => {
+                if let Some(state) = self.editing_event.as_mut().filter(|state| !state.writing) {
+                    if row < state.alerts.len() {
+                        state.alerts.remove(row);
                     }
                 }
             }

@@ -11,8 +11,8 @@ use crate::features::calendar_management::{
 use crate::features::event::location::LocationSuggestions;
 use crate::features::event::recurrence::{RecurrenceEnd, RecurrenceFreq};
 use crate::features::event::state::{
-    EventDateField, EventEditorState, REMINDER_PRESETS_MINUTES, RecurrenceScope, clock_label,
-    reminder_label,
+    ALERT_PRESETS_MINUTES, AlertDraft, EventDateField, EventEditorState, RecurrenceScope,
+    clock_label,
 };
 use crate::fl;
 
@@ -257,6 +257,95 @@ fn recurrence_section<'a>(state: &'a EventEditorState) -> widget::settings::Sect
     section
 }
 
+fn alert_label(minutes: i64) -> String {
+    if minutes == 0 {
+        fl!("event-alert-at-start")
+    } else if minutes % 1440 == 0 {
+        let days = minutes / 1440;
+        fl!("event-alert-days", count = days)
+    } else if minutes % 60 == 0 {
+        let hours = minutes / 60;
+        fl!("event-alert-hours", count = hours)
+    } else {
+        fl!("event-alert-minutes", count = minutes)
+    }
+}
+
+fn alert_row_label(number: usize) -> String {
+    if number == 1 {
+        return fl!("event-alert-first");
+    }
+    let suffix = match (number % 100, number % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    fl!(
+        "event-alert-numbered",
+        number = number.to_string(),
+        suffix = suffix
+    )
+}
+
+fn alerts_section(state: &EventEditorState) -> widget::settings::Section<'_, Message> {
+    let mut section = widget::settings::section().title(fl!("event-alerts"));
+    let add_row = state
+        .alerts
+        .last()
+        .is_none_or(|alert| alert.minutes().is_some());
+    let used: std::collections::HashSet<_> = state
+        .alerts
+        .iter()
+        .filter_map(AlertDraft::minutes)
+        .collect();
+    for row in 0..state.alerts.len() + usize::from(add_row) {
+        let alert = state.alerts.get(row);
+        let current = alert.and_then(AlertDraft::minutes);
+        let presets: Vec<_> = ALERT_PRESETS_MINUTES
+            .iter()
+            .copied()
+            .filter(|minutes| current == Some(*minutes) || !used.contains(minutes))
+            .collect();
+        let selected = match alert {
+            None => Some(0),
+            Some(AlertDraft::Preset(minutes)) => presets
+                .iter()
+                .position(|option| option == minutes)
+                .map(|index| index + 1),
+            Some(AlertDraft::Custom(_)) => Some(presets.len() + 1),
+        };
+        let mut labels = vec![fl!("event-alert-none")];
+        labels.extend(presets.iter().copied().map(alert_label));
+        labels.push(fl!("event-alert-custom"));
+
+        let mut controls = widget::row(Vec::new())
+            .align_y(cosmic::iced::Alignment::Center)
+            .spacing(spacing().space_xs);
+        if let Some(AlertDraft::Custom(input)) = alert {
+            controls = controls.push(
+                widget::text_input(fl!("event-alert-custom-minutes"), input)
+                    .on_input(move |value| Message::EditCustomEventAlert(row, value))
+                    .width(136),
+            );
+        }
+        controls = controls.push(widget::dropdown(labels, selected, move |index| {
+            if index == 0 {
+                Message::RemoveEventAlert(row)
+            } else {
+                Message::SetEventAlert(row, presets.get(index - 1).copied())
+            }
+        }));
+        section = section
+            .add(widget::settings::item::builder(alert_row_label(row + 1)).control(controls));
+    }
+    if let Some(error) = state.alert_error() {
+        section = section.add(widget::text::body(error));
+    }
+    section
+}
+
 pub fn view<'a>(
     state: &'a EventEditorState,
     calendars: &[&LocalCalendarMeta],
@@ -307,8 +396,10 @@ pub fn view<'a>(
             .icons(Cow::Owned(calendar_icons)),
         ));
     let validation_error = state.validation_error();
-    if let Some(error) = &validation_error {
-        when = when.add(widget::text::body(error.clone()));
+    if state.alert_error().is_none() {
+        if let Some(error) = &validation_error {
+            when = when.add(widget::text::body(error.clone()));
+        }
     }
 
     let location_field = widget::combo_box(
@@ -352,59 +443,6 @@ pub fn view<'a>(
                 text_input_editor_style,
             ))),
     );
-
-    let mut reminder_rows = widget::column(Vec::new()).spacing(spacing().space_xxs);
-    let mut lead_times = state.reminders.clone();
-    lead_times.sort_unstable();
-    lead_times.dedup();
-    for minutes in lead_times {
-        reminder_rows = reminder_rows.push(widget::settings::item(
-            reminder_label(minutes),
-            widget::button::icon(widget::icon::from_name("list-remove-symbolic"))
-                .name(fl!("event-remove-reminder"))
-                .on_press(Message::RemoveEventReminder(minutes)),
-        ));
-    }
-    reminder_rows = reminder_rows.push(
-        widget::button::text(fl!("event-add-reminder"))
-            .on_press(Message::ToggleEventReminderOptions),
-    );
-    if state.adding_reminder {
-        let mut presets = Vec::new();
-        for minutes in REMINDER_PRESETS_MINUTES {
-            presets.push(
-                widget::button::standard(reminder_label(minutes))
-                    .on_press_maybe(
-                        (!state.reminders.contains(&minutes))
-                            .then_some(Message::AddEventReminder(minutes)),
-                    )
-                    .into(),
-            );
-        }
-        let custom = state
-            .custom_reminder_input
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|minutes| *minutes >= 0 && !state.reminders.contains(minutes));
-        reminder_rows = reminder_rows.push(widget::flex_row(presets)).push(
-            widget::row(vec![
-                widget::text_input(
-                    fl!("custom-reminder-placeholder"),
-                    &state.custom_reminder_input,
-                )
-                .on_input(Message::EventEditorCustomReminderInputChanged)
-                .on_submit(|_| Message::EventEditorAddCustomReminder)
-                .width(Length::Fill)
-                .into(),
-                widget::button::standard(fl!("event-add-custom-reminder"))
-                    .on_press_maybe(custom.map(|_| Message::EventEditorAddCustomReminder))
-                    .into(),
-            ])
-            .align_y(cosmic::iced::Alignment::Center)
-            .spacing(spacing().space_xs),
-        );
-    }
 
     let mut options = widget::settings::section().add(
         widget::settings::item::builder(fl!("event-more-options"))
@@ -454,7 +492,7 @@ pub fn view<'a>(
     if state.recurrence_scope != RecurrenceScope::Occurrence {
         sections.push(recurrence_section(state).into());
     }
-    sections.push(widget::settings::section().add(reminder_rows).into());
+    sections.push(alerts_section(state).into());
     sections.extend([details.into(), options.into()]);
     let content = widget::settings::view_column(sections);
 

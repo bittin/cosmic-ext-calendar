@@ -117,9 +117,6 @@ event-invalid-clock = Wpisz prawidłową godzinę w formacie GG:MM.
 event-calendar = Kalendarz
 event-notes = Notatki
 event-more-options = Więcej opcji
-event-add-reminder = Dodaj przypomnienie
-event-remove-reminder = Usuń przypomnienie
-event-add-custom-reminder = Dodaj
 
 location-suggestions = Sugestie lokalizacji
 online-location-enable = Włącz wyszukiwanie online
@@ -132,3 +129,30 @@ photon-endpoint-invalid = Wpisz adres URL serwera Photon z protokołem HTTP lub 
 online-location-update = Zmień serwer
 online-location-about = Informacje o serwerze publicznym
 online-location-attribution = Photon · © Autorzy OpenStreetMap
+
+event-alerts = Alerty
+event-alert-at-start = W chwili rozpoczęcia
+event-alert-custom = Inny czas…
+event-alert-custom-minutes = Minuty przed
+event-alert-invalid = Wpisz prawidłową liczbę minut przed wydarzeniem.
+event-alert-duplicate = Wybierz inny czas dla każdego alertu.
+event-alert-minutes =
+    { $count ->
+        [one] { $count } minutę przed
+        [few] { $count } minuty przed
+       *[other] { $count } minut przed
+    }
+event-alert-hours =
+    { $count ->
+        [one] { $count } godzinę przed
+        [few] { $count } godziny przed
+       *[other] { $count } godzin przed
+    }
+event-alert-days =
+    { $count ->
+        [one] { $count } dzień przed
+       *[other] { $count } dni przed
+    }
+event-alert-none = Brak
+event-alert-first = Alert
+event-alert-numbered = { $number }. alert

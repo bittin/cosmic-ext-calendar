@@ -89,18 +89,11 @@ pub struct EventEditorState {
     pub end_clock_presets: combo_box::State<String>,
     pub date_picker: Option<(EventDateField, CalendarModel)>,
     pub more_options: bool,
-    pub adding_reminder: bool,
     pub timezone: String,
     pub floating: bool,
     pub writing: bool,
     pub recurrence: RecurrenceRule,
-    /// Minutes-before-start lead times for each reminder attached to this
-    /// event.
-    pub reminders: Vec<i64>,
-    /// Current text in the "custom reminder" minutes input, offered
-    /// alongside the fixed presets since those don't cover every lead time
-    /// someone might want.
-    pub custom_reminder_input: String,
+    pub alerts: Vec<AlertDraft>,
     /// The specific occurrence that was clicked to open this editor (equal
     /// to `start` for non-recurring events and new events), used to record
     /// which single occurrence to exclude via EXDATE on "delete this
@@ -110,17 +103,30 @@ pub struct EventEditorState {
     pub recurrence_scope: RecurrenceScope,
 }
 
-/// The lead-time presets offered when adding a reminder in the event editor.
-pub const REMINDER_PRESETS_MINUTES: [i64; 6] = [0, 5, 10, 15, 30, 60];
+pub const ALERT_PRESETS_MINUTES: [i64; 12] = [0, 1, 5, 10, 15, 30, 45, 60, 120, 1440, 2880, 10080];
 
-/// The label shown on a reminder preset's segmented-button entry.
-pub fn reminder_label(minutes: i64) -> String {
-    if minutes == 0 {
-        fl!("reminder-at-start")
-    } else if minutes % 60 == 0 {
-        format!("{}h", minutes / 60)
-    } else {
-        format!("{minutes}m")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlertDraft {
+    Preset(i64),
+    Custom(String),
+}
+
+impl AlertDraft {
+    fn from_minutes(minutes: i64) -> Self {
+        if ALERT_PRESETS_MINUTES.contains(&minutes) {
+            Self::Preset(minutes)
+        } else {
+            Self::Custom(minutes.to_string())
+        }
+    }
+
+    pub fn minutes(&self) -> Option<i64> {
+        let minutes = match self {
+            Self::Preset(minutes) => *minutes,
+            Self::Custom(input) => input.trim().parse().ok()?,
+        };
+        minutes.checked_mul(60).filter(|seconds| *seconds >= 0)?;
+        Some(minutes)
     }
 }
 
@@ -196,13 +202,11 @@ impl EventEditorState {
             end_clock_presets: clock_presets(),
             date_picker: None,
             more_options: false,
-            adding_reminder: false,
             timezone,
             floating: false,
             writing: false,
             recurrence: RecurrenceRule::NONE,
-            reminders: Vec::new(),
-            custom_reminder_input: String::new(),
+            alerts: Vec::new(),
             occurrence_start: start,
             recurring_series: false,
             recurrence_scope: RecurrenceScope::Series,
@@ -237,17 +241,20 @@ impl EventEditorState {
             end_clock_presets: clock_presets(),
             date_picker: None,
             more_options: event.floating || event.timezone.is_some(),
-            adding_reminder: false,
             timezone: event.timezone.clone().unwrap_or_default(),
             floating: event.floating,
             writing: false,
             recurrence: editor_recurrence(event),
-            reminders: event
-                .reminders
-                .iter()
-                .map(|reminder| reminder.minutes_before)
-                .collect(),
-            custom_reminder_input: String::new(),
+            alerts: {
+                let mut seen = std::collections::HashSet::new();
+                event
+                    .reminders
+                    .iter()
+                    .map(|reminder| reminder.minutes_before)
+                    .filter(|minutes| seen.insert(*minutes))
+                    .map(AlertDraft::from_minutes)
+                    .collect()
+            },
             occurrence_start,
             recurring_series: event.is_recurring(),
             recurrence_scope: RecurrenceScope::Series,
@@ -303,8 +310,7 @@ impl EventEditorState {
             && !self.is_task
             && !self.floating
             && self.recurrence.freq == super::recurrence::RecurrenceFreq::None
-            && self.reminders.is_empty()
-            && self.custom_reminder_input.is_empty()
+            && self.alerts.is_empty()
             && !invalid_clock
     }
 
@@ -400,7 +406,40 @@ impl EventEditorState {
         )
     }
 
+    pub fn set_alert(&mut self, row: usize, choice: Option<i64>) {
+        let alert = match choice {
+            Some(minutes) => AlertDraft::Preset(minutes),
+            None => AlertDraft::Custom(
+                self.alerts
+                    .get(row)
+                    .and_then(AlertDraft::minutes)
+                    .map_or_else(String::new, |minutes| minutes.to_string()),
+            ),
+        };
+        if row == self.alerts.len() {
+            self.alerts.push(alert);
+        } else if let Some(existing) = self.alerts.get_mut(row) {
+            *existing = alert;
+        }
+    }
+
+    pub fn alert_error(&self) -> Option<String> {
+        let mut seen = std::collections::HashSet::new();
+        for alert in &self.alerts {
+            let Some(minutes) = alert.minutes() else {
+                return Some(fl!("event-alert-invalid"));
+            };
+            if !seen.insert(minutes) {
+                return Some(fl!("event-alert-duplicate"));
+            }
+        }
+        None
+    }
+
     pub fn validation_error(&self) -> Option<String> {
+        if let Some(error) = self.alert_error() {
+            return Some(error);
+        }
         if !self.all_day
             && [&self.start_clock_input, &self.end_clock_input]
                 .into_iter()
@@ -530,11 +569,10 @@ impl EventEditorState {
             ics_uid: existing.and_then(|event| event.ics_uid.clone()),
             attendees: existing.map_or(Vec::new(), |event| event.attendees.clone()),
             reminders: self
-                .reminders
+                .alerts
                 .iter()
-                .map(|minutes_before| Reminder {
-                    minutes_before: *minutes_before,
-                })
+                .filter_map(AlertDraft::minutes)
+                .map(|minutes_before| Reminder { minutes_before })
                 .collect(),
             source: Source::Local,
             external: None,
@@ -561,6 +599,32 @@ mod tests {
             false,
             String::new(),
         )
+    }
+
+    #[test]
+    fn alerts_accept_multiple_presets_and_custom_values() {
+        let mut state = editor();
+        state.set_alert(0, Some(15));
+        state.set_alert(1, None);
+        assert!(state.validation_error().is_some());
+        state.alerts[1] = AlertDraft::Custom("15".into());
+        assert!(state.validation_error().is_some());
+        state.alerts[1] = AlertDraft::Custom("75".into());
+        state.set_alert(2, Some(1440));
+        state.set_alert(0, Some(30));
+        assert!(state.validation_error().is_none());
+
+        let event = state.build_event(None);
+        assert_eq!(
+            event
+                .reminders
+                .iter()
+                .map(|alert| alert.minutes_before)
+                .collect::<Vec<_>>(),
+            [30, 75, 1440]
+        );
+        let reopened = EventEditorState::from_event(&event, event.start());
+        assert_eq!(reopened.alerts, state.alerts);
     }
 
     #[test]

@@ -47,10 +47,6 @@ color = Color
 rename = Rename
 search = Search events…
 no-results = No matching events
-reminders = Reminders
-reminders-caption = Notify before the event starts. Select any number of reminders.
-reminder-at-start = At start
-custom-reminder-placeholder = Custom reminder (minutes before)
 
 previous-month = Previous month
 next-month = Next month
@@ -154,9 +150,6 @@ event-invalid-clock = Enter a valid time in HH:MM format.
 event-calendar = Calendar
 event-notes = Notes
 event-more-options = More options
-event-add-reminder = Add reminder
-event-remove-reminder = Remove reminder
-event-add-custom-reminder = Add
 
 location-suggestions = Location suggestions
 online-location-enable = Enable online lookup
@@ -169,3 +162,34 @@ photon-endpoint-invalid = Enter an HTTP or HTTPS Photon server URL.
 online-location-update = Update server
 online-location-about = About the public server
 online-location-attribution = Photon · © OpenStreetMap contributors
+
+event-alerts = Alerts
+event-alert-at-start = At time of event
+event-alert-custom = Custom…
+event-alert-custom-minutes = Minutes before
+event-alert-invalid = Enter a valid number of minutes before the event.
+event-alert-duplicate = Choose a different time for each alert.
+event-alert-minutes =
+    { $count ->
+        [one] { $count } minute before
+       *[other] { $count } minutes before
+    }
+event-alert-hours =
+    { $count ->
+        [one] { $count } hour before
+       *[other] { $count } hours before
+    }
+event-alert-days =
+    { $count ->
+        [one] { $count } day before
+       *[other] { $count } days before
+    }
+event-alert-none = None
+event-alert-first = Alert
+event-alert-numbered =
+    { $suffix ->
+        [st] { $number }st Alert
+        [nd] { $number }nd Alert
+        [rd] { $number }rd Alert
+       *[th] { $number }th Alert
+    }
