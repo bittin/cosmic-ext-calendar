@@ -32,4 +32,5 @@ pub struct Config {
     demo: String,
     pub display_timezone: String,
     pub app_theme: AppTheme,
+    pub photon_endpoint: String,
 }

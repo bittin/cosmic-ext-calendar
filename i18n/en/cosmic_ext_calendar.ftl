@@ -147,3 +147,25 @@ calendar-color-default = Default color
 calendar-color-recent = Recent colors
 calendar-color-copy = Copy to clipboard
 calendar-color-copied = Copied to clipboard
+
+event-title = Event title
+event-date-label = { $date }, { $year }
+event-invalid-clock = Enter a valid time in HH:MM format.
+event-calendar = Calendar
+event-notes = Notes
+event-more-options = More options
+event-add-reminder = Add reminder
+event-remove-reminder = Remove reminder
+event-add-custom-reminder = Add
+
+location-suggestions = Location suggestions
+online-location-enable = Enable online lookup
+online-location-disable = Disable online lookup
+online-location-save-error = Could not save online location settings.
+online-location-unavailable = Online suggestions are unavailable.
+online-location-description = Use Photon to look up addresses and places. While enabled, location searches are sent to the server below. The public demo is for light use.
+photon-endpoint = Photon server URL
+photon-endpoint-invalid = Enter an HTTP or HTTPS Photon server URL.
+online-location-update = Update server
+online-location-about = About the public server
+online-location-attribution = Photon · © OpenStreetMap contributors

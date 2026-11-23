@@ -114,7 +114,7 @@ fn swatch_frame<'a>(
 }
 
 /// Filled circles indicate visible calendars and rings indicate hidden calendars.
-pub fn sidebar_color_icon(color: Option<cosmic::iced::Color>, visible: bool) -> widget::icon::Icon {
+pub fn calendar_color_icon(color: Option<cosmic::iced::Color>, visible: bool) -> widget::icon::Handle {
     let paint = color.map_or_else(
         || "#ffffff".to_owned(),
         |color| {
@@ -127,8 +127,5 @@ pub fn sidebar_color_icon(color: Option<cosmic::iced::Color>, visible: bool) -> 
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5" fill="{fill}" stroke="{paint}" stroke-width="2"/></svg>"#,
     );
 
-    widget::icon::from_svg_bytes(svg.into_bytes())
-        .symbolic(color.is_none())
-        .icon()
-        .size(16)
+    widget::icon::from_svg_bytes(svg.into_bytes()).symbolic(color.is_none())
 }

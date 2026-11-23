@@ -3,12 +3,10 @@
 use crate::features::calendar::{CalendarAnchor, CalendarSlot, EventSelection, LocalCalendar};
 use crate::features::calendar_management::model::{CalendarKey, LocalCalendarMeta, calendar_color};
 use crate::features::calendar_management::{state::CalendarForm, view as calendar_form};
+use crate::features::event::location::{LocationSuggestions, OnlinePlaces, PUBLIC_PHOTON_ENDPOINT, find_online, photon_api_url};
 use crate::features::event::model::{Event, EventTime};
 use crate::features::event::recurrence::{RecurrenceEnd, RecurrenceFreq};
-use crate::features::event::state::{
-    EVENT_EDITOR_MINUTES, EVENT_EDITOR_YEARS, EventEditorState, RecurrenceScope,
-    build_reminders_model, event_editor_months, shift_event_editor_start,
-};
+use crate::features::event::state::{EventDateField, EventEditorState, RecurrenceScope};
 use crate::features::ics;
 use crate::fl;
 use crate::shared::config::{AppTheme, Config};
@@ -85,6 +83,7 @@ pub struct AppModel {
     core: cosmic::Core,
     /// Display a context drawer with the designated page if defined.
     context_page: ContextPage,
+    sidebar_before_agenda: Option<bool>,
     /// Main window width reported by COSMIC.
     window_width: f32,
     /// Contains items assigned to the nav bar panel.
@@ -108,14 +107,12 @@ pub struct AppModel {
     storage_read_only: bool,
     calendar_to_archive: Option<(CalendarId, String)>,
     calendar_archive_busy: bool,
-    // State of the event editor drawer, when open.
+    // State of the event editor dialog, when open.
     editing_event: Option<EventEditorState>,
-    // Multi-select segmented button backing the reminder-preset picker in
-    // the event editor. Rebuilt from `editing_event.reminders` whenever the
-    // editor opens or a preset is toggled; `Vec<i64>` remains the source of
-    // truth that's actually persisted, since `segmented_button::Model` isn't
-    // `Clone` and can't live inside `EventEditorState`.
-    reminders_model: widget::segmented_button::Model<widget::segmented_button::MultiSelect>,
+    event_notes: widget::text_editor::Content,
+    event_locations: LocationSuggestions,
+    location_lookup: Option<(uuid::Uuid, cosmic::iced::task::Handle)>,
+    photon_endpoint_input: Option<String>,
     calendar_form: Option<CalendarForm>,
     // Nav bar entity ids for the "Calendars" header + per-calendar rows,
     // tracked so they can be torn down and rebuilt on every CRUD change.
@@ -161,30 +158,32 @@ pub enum Message {
     CloseCalendarPopup,
     CalendarAction(CalendarAction, Option<EventSelection>, OffsetDateTime),
     CloseEventEditor,
+    EscapeEventEditor,
     EventEditorSummaryChanged(String),
-    EventEditorDescriptionChanged(String),
+    ToggleEventTitleEditing(bool),
+    EventEditorNotesChanged(widget::text_editor::Action),
     EventEditorLocationChanged(String),
+    SelectEventLocation(String),
+    CloseEventLocationSuggestions,
+    OnlineLocationsFound(uuid::Uuid, Result<OnlinePlaces, ()>),
+    PhotonEndpointChanged(String),
+    SavePhotonEndpoint,
+    DisableOnlineLocations,
     EventEditorAllDayToggled(bool),
     EventEditorTimezoneChanged(String),
     EventEditorFloatingToggled(bool),
     EventEditorTaskToggled(bool),
-    EventEditorStartYearChanged(usize),
-    EventEditorStartMonthChanged(usize),
-    EventEditorStartDayChanged(usize),
-    EventEditorStartHourChanged(usize),
-    EventEditorStartMinuteChanged(usize),
-    EventEditorEndYearChanged(usize),
-    EventEditorEndMonthChanged(usize),
-    EventEditorEndDayChanged(usize),
-    EventEditorEndHourChanged(usize),
-    EventEditorEndMinuteChanged(usize),
+    OpenEventDatePicker(EventDateField),
+    CloseEventDatePicker,
+    BrowseEventDatePicker(i32),
+    SelectEventDate(jiff::civil::Date),
+    EventClockChanged(bool, String),
+    CloseEventClockSearch(bool),
+    ToggleEventOptions,
     EventEditorRecurrenceChanged(usize),
     EventEditorRecurrenceIntervalChanged(usize),
     EventEditorRecurrenceWeekdayToggled(usize, bool),
     EventEditorRecurrenceEndChanged(usize),
-    EventEditorRecurrenceUntilYearChanged(usize),
-    EventEditorRecurrenceUntilMonthChanged(usize),
-    EventEditorRecurrenceUntilDayChanged(usize),
     EventEditorRecurrenceCountChanged(usize),
     EventEditorCalendarChanged(usize),
     SaveEvent,
@@ -219,9 +218,10 @@ pub enum Message {
     CloseToast(widget::ToastId),
     SearchChanged(String),
     SelectSearchResult(EventId, OffsetDateTime),
-    EventEditorReminderToggled(widget::segmented_button::Entity),
+    AddEventReminder(i64),
+    RemoveEventReminder(i64),
+    ToggleEventReminderOptions,
     EventEditorCustomReminderInputChanged(String),
-    EventEditorCustomReminderEditToggled(bool),
     EventEditorAddCustomReminder,
     CheckReminders,
     RemindersFired(Vec<ReminderKey>),
@@ -288,6 +288,7 @@ impl cosmic::Application for AppModel {
         let mut app = AppModel {
             core,
             context_page: ContextPage::default(),
+            sidebar_before_agenda: None,
             window_width: 0.0,
             nav,
             tabs,
@@ -320,7 +321,10 @@ impl cosmic::Application for AppModel {
             calendar_to_archive: None,
             calendar_archive_busy: false,
             editing_event: None,
-            reminders_model: build_reminders_model(&[]),
+            event_notes: widget::text_editor::Content::new(),
+            event_locations: LocationSuggestions::new([], ""),
+            location_lookup: None,
+            photon_endpoint_input: None,
             calendar_form: None,
             calendar_nav_ids: Vec::new(),
             calendars_collapsed: false,
@@ -429,21 +433,11 @@ impl cosmic::Application for AppModel {
             .map_or(Message::AddEvent(self.calendar.current_date), |slot| {
                 self.create_event_at_slot(slot)
             });
-        let today = widget::button::icon(widget::icon::from_name("calendar-go-today-symbolic"))
-            .name(fl!("today"))
-            .class(cosmic::style::Button::NavToggle)
-            .on_press_maybe((!self.calendar.today()).then_some(Message::NavigateToday));
         let create_event = widget::button::icon(widget::icon::from_name("list-add-symbolic"))
             .name(fl!("create-event"))
             .on_press(create_message);
 
         vec![
-            widget::tooltip(
-                today,
-                widget::text(fl!("today")),
-                widget::tooltip::Position::Bottom,
-            )
-            .into(),
             widget::tooltip(
                 create_event,
                 widget::text(fl!("create-event")),
@@ -530,14 +524,36 @@ impl cosmic::Application for AppModel {
         .align_y(Vertical::Center)
         .spacing(spacing().space_xxs);
 
+        let today_icon = widget::icon::from_svg_bytes(
+            include_bytes!("../resources/icons/calendar-today-symbolic.svg").as_slice(),
+        )
+        .symbolic(true);
+        let today_width = f32::from(spacing().space_l);
+        let today = widget::button::icon(today_icon)
+            .tooltip(fl!("today"))
+            .name(fl!("today"))
+            .width(today_width)
+            .class(cosmic::style::Button::NavToggle)
+            .on_press_maybe((!self.calendar.today()).then_some(Message::NavigateToday));
+        let navigation = widget::flex_row(vec![days.into(), months.into(), years.into()])
+            .width(Length::Fill)
+            .justify_content(widget::JustifyContent::Center)
+            .justify_items(Alignment::Center)
+            .spacing(spacing().space_xs);
+
+        let navigation = widget::container(navigation)
+            .padding([0.0, today_width + f32::from(spacing().space_xxs)])
+            .width(Length::Fill);
+        let actions = widget::row(vec![widget::space::horizontal().into(), today.into()])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(Vertical::Center);
+        let footer = cosmic::iced::widget::stack(vec![navigation.into(), actions.into()])
+            .width(Length::Fill)
+            .height(Length::Shrink);
+
         Some(
-            widget::container(
-                widget::flex_row(vec![days.into(), months.into(), years.into()])
-                    .width(Length::Fill)
-                    .justify_content(widget::JustifyContent::Center)
-                    .justify_items(Alignment::Center)
-                    .spacing(spacing().space_xs),
-            )
+            widget::container(footer)
             .class(cosmic::theme::Container::Card)
             .padding(spacing().space_xxxs)
             .width(Length::Fill)
@@ -547,7 +563,7 @@ impl cosmic::Application for AppModel {
 
     /// Enables the COSMIC application to create a nav bar with this model.
     fn nav_model(&self) -> Option<&nav_bar::Model> {
-        Some(&self.nav)
+        self.sidebar_before_agenda.is_none().then_some(&self.nav)
     }
 
     /// The nav bar's per-item right-click menu: "New calendar" on the
@@ -758,7 +774,25 @@ impl cosmic::Application for AppModel {
         } else {
             Subscription::none()
         };
-        Subscription::batch([reminders_tick, config_updates, month_shortcuts])
+        // Libcosmic forwards ignored Escape presses to on_escape. Handle ones
+        // captured by the editor's focused input through the same path.
+        let editor_escape = if self.editing_event.is_some() {
+            cosmic::iced::event::listen_with(|event, status, _| {
+                use cosmic::iced::{Event, event::Status, keyboard::{Event as KeyEvent, Key, key::Named}};
+
+                match (event, status) {
+                    (Event::Keyboard(KeyEvent::KeyPressed {
+                        key: Key::Named(Named::Escape),
+                        repeat: false,
+                        ..
+                    }), Status::Captured) => Some(Message::EscapeEventEditor),
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([reminders_tick, config_updates, month_shortcuts, editor_escape])
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -875,26 +909,29 @@ impl cosmic::Application for AppModel {
                     self.calendar.selected_slot = None;
                     tasks.push(self.scroll_calendar_to_now());
                 }
-                if self.context_page == ContextPage::DayAgenda
-                    && !matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month))
-                {
-                    self.core.set_show_context(false);
+                if !matches!(self.tabs.active_data::<Tab>(), Some(Tab::Month)) {
+                    self.close_day_agenda();
                 }
             }
             Message::OpenRepositoryUrl => {
                 _ = open::that_detached(REPOSITORY);
             }
             Message::ToggleContextPage(context_page) => {
-                if self.context_page == context_page {
-                    // Close the context drawer if the toggled context page is the same.
-                    self.core.window.show_context = !self.core.window.show_context;
+                if self.context_page == context_page && self.core.window.show_context {
+                    if !self.close_day_agenda() {
+                        self.core.set_show_context(false);
+                    }
+                } else if context_page == ContextPage::DayAgenda {
+                    self.open_day_agenda();
                 } else {
-                    // Open the context drawer to display the requested context page.
-                    self.context_page = context_page;
-                    self.core.window.show_context = true;
+                    self.show_context_page(context_page);
                 }
             }
             Message::UpdateConfig(config) => {
+                if self.config.photon_endpoint != config.photon_endpoint {
+                    self.photon_endpoint_input = None;
+                    self.clear_online_locations();
+                }
                 let theme_changed = self.config.app_theme != config.app_theme;
                 self.config = config;
                 self.refresh_display_timezone();
@@ -938,6 +975,28 @@ impl cosmic::Application for AppModel {
                     }
                 }
             }
+            Message::PhotonEndpointChanged(value) => self.photon_endpoint_input = Some(value),
+            Message::SavePhotonEndpoint | Message::DisableOnlineLocations => {
+                let endpoint = if matches!(message, Message::DisableOnlineLocations) {
+                    String::new()
+                } else {
+                    let Some(url) = photon_api_url(self.photon_endpoint_input()) else {
+                        return Task::none();
+                    };
+                    url.into()
+                };
+                let mut config = self.config.clone();
+                match cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
+                    .and_then(|context| config.set_photon_endpoint(&context, endpoint))
+                {
+                    Ok(_) => {
+                        self.config = config;
+                        self.photon_endpoint_input = None;
+                        self.clear_online_locations();
+                    }
+                    Err(_) => tasks.push(self.toast(fl!("online-location-save-error"))),
+                }
+            }
             Message::LaunchUrl(url) => match open::that_detached(&url) {
                 Ok(()) => {}
                 Err(err) => {
@@ -978,18 +1037,30 @@ impl cosmic::Application for AppModel {
                     let Some(calendar) = calendar else {
                         return cosmic::task::message(Message::OpenNewCalendarForm);
                     };
-                    let mut state = EventEditorState::new(calendar, date);
-                    state.all_day = all_day;
-                    state.timezone = self
-                        .calendar
-                        .display_timezone
+                    let timezone = self.calendar.display_timezone
                         .map(|zone| zone.name().to_string())
                         .unwrap_or_default();
-                    state
+                    EventEditorState::new(calendar, date, all_day, timezone)
                 };
                 self.calendar_click = None;
-                self.reminders_model = build_reminders_model(&state.reminders);
+                self.event_notes = widget::text_editor::Content::with_text(&state.description);
+                self.location_lookup = None;
+                self.event_locations = LocationSuggestions::new(
+                    self.storage.lock().unwrap().all_events(),
+                    &state.location,
+                );
+                if state.editing_title {
+                    tasks.push(widget::text_input::focus(crate::features::event::view::title_id()));
+                }
                 self.editing_event = Some(state);
+            }
+            Message::EscapeEventEditor => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    if state.date_picker.take().is_none() && state.can_dismiss_with_escape() {
+                        self.location_lookup = None;
+                        self.editing_event = None;
+                    }
+                }
             }
             Message::CloseEventEditor => {
                 if !self
@@ -997,6 +1068,7 @@ impl cosmic::Application for AppModel {
                     .as_ref()
                     .is_some_and(|state| state.writing)
                 {
+                    self.location_lookup = None;
                     self.editing_event = None;
                 }
             }
@@ -1005,14 +1077,54 @@ impl cosmic::Application for AppModel {
                     state.summary = value;
                 }
             }
-            Message::EventEditorDescriptionChanged(value) => {
+            Message::ToggleEventTitleEditing(editing) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    state.description = value;
+                    state.editing_title = editing;
+                }
+            }
+            Message::EventEditorNotesChanged(action) => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    self.event_notes.perform(action);
+                    state.description = self.event_notes.text();
                 }
             }
             Message::EventEditorLocationChanged(value) => {
-                if let Some(state) = self.editing_event.as_mut() {
+                if let Some(state) = self.editing_event.as_mut().filter(|state| !state.writing) {
                     state.location = value;
+                    self.location_lookup = None;
+                    self.event_locations.clear_online(&state.location);
+
+                    let query = state.location.trim();
+                    if let Some(endpoint) = photon_api_url(&self.config.photon_endpoint)
+                        .filter(|_| (3..=256).contains(&query.chars().count()))
+                    {
+                        let request = uuid::Uuid::new_v4();
+                        let (task, handle) = Task::perform(
+                            find_online(query.to_owned(), endpoint),
+                            move |result| cosmic::action::app(Message::OnlineLocationsFound(request, result)),
+                        ).abortable();
+                        self.location_lookup = Some((request, handle.abort_on_drop()));
+                        tasks.push(task);
+                    }
+                }
+            }
+            Message::SelectEventLocation(value) => {
+                if let Some(state) = self.editing_event.as_mut().filter(|state| !state.writing) {
+                    state.location = value;
+                    self.location_lookup = None;
+                    self.event_locations.select(&state.location);
+                }
+            }
+            Message::CloseEventLocationSuggestions => self.location_lookup = None,
+            Message::OnlineLocationsFound(request, result) => {
+                if self.location_lookup.as_ref().is_some_and(|(pending, _)| *pending == request) {
+                    self.location_lookup = None;
+                    if let Some(state) = self.editing_event.as_ref().filter(|state| !state.writing) {
+                        match result {
+                            Ok(places) => self.event_locations.set_online(places, &state.location),
+                            Err(()) => self.event_locations.online_failed = true,
+                        }
+                    }
                 }
             }
             Message::EventEditorFloatingToggled(floating) => {
@@ -1035,87 +1147,55 @@ impl cosmic::Application for AppModel {
                     state.is_task = value;
                 }
             }
-            Message::EventEditorStartYearChanged(idx) | Message::EventEditorEndYearChanged(idx) => {
-                let is_start = matches!(message, Message::EventEditorStartYearChanged(_));
+            Message::OpenEventDatePicker(field) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    let date = if is_start { state.start } else { state.end };
-                    let year = EVENT_EDITOR_YEARS[0] + idx as i32;
-                    let day = date.day().min(date.month().length(year));
-                    if let Ok(new_date) = date
-                        .replace_day(day)
-                        .and_then(|date| date.replace_year(year))
-                    {
-                        if is_start {
-                            shift_event_editor_start(state, new_date);
-                        } else {
-                            state.end = new_date;
+                    if state.date_picker.is_some_and(|(open, _)| open == field) {
+                        state.date_picker = None;
+                    } else if let Some(date) = state.date(field) {
+                        if let Ok(date) = jiff::civil::Date::new(
+                            date.year() as i16, u8::from(date.month()) as i8, date.day() as i8,
+                        ) {
+                            state.date_picker = Some((field, widget::calendar::CalendarModel::new(date, date)));
                         }
                     }
                 }
             }
-            Message::EventEditorStartMonthChanged(idx)
-            | Message::EventEditorEndMonthChanged(idx) => {
-                let is_start = matches!(message, Message::EventEditorStartMonthChanged(_));
+            Message::CloseEventDatePicker => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    let date = if is_start { state.start } else { state.end };
-                    if let Some(&month) = event_editor_months().get(idx) {
-                        let day = date.day().min(month.length(date.year()));
-                        if let Ok(new_date) = date
-                            .replace_day(day)
-                            .and_then(|date| date.replace_month(month))
-                        {
-                            if is_start {
-                                shift_event_editor_start(state, new_date);
-                            } else {
-                                state.end = new_date;
-                            }
+                    state.date_picker = None;
+                }
+            }
+            Message::BrowseEventDatePicker(delta) => {
+                if let Some((_, model)) = self.editing_event.as_mut().and_then(|state| state.date_picker.as_mut()) {
+                    if let Ok(month) = model.visible.checked_add(jiff::Span::new().months(delta)) {
+                        model.visible = month;
+                    }
+                }
+            }
+            Message::SelectEventDate(date) => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    if let Some((field, _)) = state.date_picker.take() {
+                        if let Ok(date) = time::Month::try_from(date.month() as u8).and_then(|month| {
+                            time::Date::from_calendar_date(i32::from(date.year()), month, date.day() as u8)
+                        }) {
+                            state.select_date(field, date);
                         }
                     }
                 }
             }
-            Message::EventEditorStartDayChanged(idx) | Message::EventEditorEndDayChanged(idx) => {
-                let is_start = matches!(message, Message::EventEditorStartDayChanged(_));
+            Message::EventClockChanged(is_start, input) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    let date = if is_start { state.start } else { state.end };
-                    if let Ok(new_date) = date.replace_day(idx as u8 + 1) {
-                        if is_start {
-                            shift_event_editor_start(state, new_date);
-                        } else {
-                            state.end = new_date;
-                        }
-                    }
+                    state.input_clock(is_start, input);
                 }
             }
-            Message::EventEditorStartHourChanged(idx) => {
+            Message::CloseEventClockSearch(is_start) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    if let Ok(new_start) = state.start.replace_hour(idx as u8) {
-                        shift_event_editor_start(state, new_start);
-                    }
+                    state.reset_clock_search(is_start);
                 }
             }
-            Message::EventEditorStartMinuteChanged(idx) => {
+            Message::ToggleEventOptions => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    if idx < EVENT_EDITOR_MINUTES {
-                        if let Ok(new_start) = state.start.replace_minute(idx as u8) {
-                            shift_event_editor_start(state, new_start);
-                        }
-                    }
-                }
-            }
-            Message::EventEditorEndHourChanged(idx) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if let Ok(new_end) = state.end.replace_hour(idx as u8) {
-                        state.end = new_end;
-                    }
-                }
-            }
-            Message::EventEditorEndMinuteChanged(idx) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if idx < EVENT_EDITOR_MINUTES {
-                        if let Ok(new_end) = state.end.replace_minute(idx as u8) {
-                            state.end = new_end;
-                        }
-                    }
+                    state.more_options = !state.more_options;
                 }
             }
             Message::EventEditorRecurrenceChanged(idx) => {
@@ -1144,39 +1224,6 @@ impl cosmic::Application for AppModel {
                         2 => RecurrenceEnd::Count(10),
                         _ => RecurrenceEnd::Never,
                     };
-                }
-            }
-            Message::EventEditorRecurrenceUntilYearChanged(idx) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if let RecurrenceEnd::Until(until) = &mut state.recurrence.end {
-                        let year = EVENT_EDITOR_YEARS[0] + idx as i32;
-                        if let Ok(new_date) = until.replace_year(year) {
-                            *until = new_date;
-                        }
-                    }
-                }
-            }
-            Message::EventEditorRecurrenceUntilMonthChanged(idx) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if let RecurrenceEnd::Until(until) = &mut state.recurrence.end {
-                        if let Some(month) = event_editor_months().get(idx) {
-                            let day = until.day().min(month.length(until.year()));
-                            if let Ok(new_date) =
-                                until.replace_month(*month).and_then(|d| d.replace_day(day))
-                            {
-                                *until = new_date;
-                            }
-                        }
-                    }
-                }
-            }
-            Message::EventEditorRecurrenceUntilDayChanged(idx) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    if let RecurrenceEnd::Until(until) = &mut state.recurrence.end {
-                        if let Ok(new_date) = until.replace_day(idx as u8 + 1) {
-                            *until = new_date;
-                        }
-                    }
                 }
             }
             Message::EventEditorRecurrenceCountChanged(idx) => {
@@ -1213,6 +1260,7 @@ impl cosmic::Application for AppModel {
                     .filter(|state| !state.writing && state.validation_error().is_none())
                 {
                     state.writing = true;
+                    self.location_lookup = None;
                     let state = state.clone();
                     let storage = self.storage.clone();
                     tasks.push(Task::perform(
@@ -1342,8 +1390,7 @@ impl cosmic::Application for AppModel {
                 }
             },
             Message::ImportIcs if self.ics_import.busy => {
-                self.context_page = ContextPage::IcsImport;
-                self.core.set_show_context(true);
+                self.show_context_page(ContextPage::IcsImport);
             }
             Message::ImportIcs => {
                 tasks.push(Task::perform(
@@ -1364,13 +1411,13 @@ impl cosmic::Application for AppModel {
                     .into_iter()
                     .min_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)))
                     .map(|calendar| calendar.id);
+                drop(storage);
                 self.ics_import = IcsImportState {
                     path: Some(path),
                     calendar,
                     ..IcsImportState::default()
                 };
-                self.context_page = ContextPage::IcsImport;
-                self.core.set_show_context(true);
+                self.show_context_page(ContextPage::IcsImport);
             }
             Message::IcsFileChosen(_) => {}
             Message::SelectImportCalendar(id) => self.ics_import.calendar = Some(id),
@@ -1702,8 +1749,8 @@ impl cosmic::Application for AppModel {
                 if returning_to_calendar {
                     tasks.push(self.scroll_calendar_to_now());
                 }
-                if self.context_page == ContextPage::DayAgenda && !self.search_query.is_empty() {
-                    self.core.set_show_context(false);
+                if !self.search_query.is_empty() {
+                    self.close_day_agenda();
                 }
             }
             Message::SelectSearchResult(id, start) => {
@@ -1712,33 +1759,27 @@ impl cosmic::Application for AppModel {
                 self.calendar.selected_event = Some((id, start));
                 self.open_event_details((id, start), None);
             }
-            Message::EventEditorReminderToggled(entity) => {
-                let Some(minutes) = self.reminders_model.data::<i64>(entity).copied() else {
-                    return Task::batch(tasks);
-                };
-                let now_on = !self.reminders_model.is_active(entity);
+            Message::AddEventReminder(minutes) => {
                 if let Some(state) = self.editing_event.as_mut() {
-                    if now_on {
-                        if !state.reminders.contains(&minutes) {
-                            state.reminders.push(minutes);
-                        }
-                    } else {
-                        state.reminders.retain(|m| *m != minutes);
+                    if !state.reminders.contains(&minutes) {
+                        state.reminders.push(minutes);
                     }
-                    // Rebuilt rather than toggled in place: a custom (non-preset)
-                    // entry has no "off" state to fall back to, so turning it off
-                    // must drop it from the model entirely, not just deactivate it.
-                    self.reminders_model = build_reminders_model(&state.reminders);
+                    state.adding_reminder = false;
+                }
+            }
+            Message::RemoveEventReminder(minutes) => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    state.reminders.retain(|value| *value != minutes);
+                }
+            }
+            Message::ToggleEventReminderOptions => {
+                if let Some(state) = self.editing_event.as_mut() {
+                    state.adding_reminder = !state.adding_reminder;
                 }
             }
             Message::EventEditorCustomReminderInputChanged(value) => {
                 if let Some(state) = self.editing_event.as_mut() {
                     state.custom_reminder_input = value;
-                }
-            }
-            Message::EventEditorCustomReminderEditToggled(editing) => {
-                if let Some(state) = self.editing_event.as_mut() {
-                    state.custom_reminder_editing = editing;
                 }
             }
             Message::EventEditorAddCustomReminder => {
@@ -1747,8 +1788,7 @@ impl cosmic::Application for AppModel {
                         if minutes >= 0 && !state.reminders.contains(&minutes) {
                             state.reminders.push(minutes);
                             state.custom_reminder_input.clear();
-                            state.custom_reminder_editing = false;
-                            self.reminders_model = build_reminders_model(&state.reminders);
+                            state.adding_reminder = false;
                         }
                     }
                 }
@@ -1785,8 +1825,7 @@ impl cosmic::Application for AppModel {
                 self.open_day_agenda();
             }
             Message::CloseDayAgenda => {
-                if self.context_page == ContextPage::DayAgenda && self.core.window.show_context {
-                    self.core.set_show_context(false);
+                if self.close_day_agenda() {
                     tasks.push(widget::button::focus(
                         crate::features::calendar::month::day_id(
                             self.calendar.selected_date.date(),
@@ -1881,6 +1920,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn on_escape(&mut self) -> Task<cosmic::Action<Self::Message>> {
+        if self.editing_event.is_some() {
+            return self.update(Message::EscapeEventEditor);
+        }
         if self.calendar_to_archive.is_some() {
             return cosmic::task::message(Message::CancelArchiveCalendar);
         }
@@ -1895,7 +1937,7 @@ impl cosmic::Application for AppModel {
         if self.calendar_popup.take().is_some() {
             return Task::none();
         }
-        if !self.core.window.show_context || self.editing_event.is_some() {
+        if !self.core.window.show_context {
             return Task::none();
         }
         match self.context_page {
@@ -2202,13 +2244,34 @@ impl AppModel {
             return false;
         };
         state.writing = true;
+        self.location_lookup = None;
         true
     }
 
+    fn show_context_page(&mut self, page: ContextPage) {
+        self.close_day_agenda();
+        self.context_page = page;
+        self.update_drawer_layout();
+        self.core.set_show_context(true);
+    }
+
     fn open_day_agenda(&mut self) {
+        if self.sidebar_before_agenda.is_none() {
+            self.sidebar_before_agenda = Some(self.core.nav_bar_active());
+            self.core.nav_bar_set_toggled(false);
+        }
         self.context_page = ContextPage::DayAgenda;
         self.update_drawer_layout();
         self.core.set_show_context(true);
+    }
+
+    fn close_day_agenda(&mut self) -> bool {
+        let Some(was_open) = self.sidebar_before_agenda.take() else {
+            return false;
+        };
+        self.core.set_show_context(false);
+        self.core.nav_bar_set_toggled(was_open);
+        true
     }
 
     fn update_drawer_layout(&mut self) {
@@ -2299,7 +2362,54 @@ impl AppModel {
                 |index| Message::SetTheme(AppTheme::OPTIONS[index]),
             )),
         );
-        widget::settings::view_column(vec![appearance.into(), section.into()]).into()
+        let online_enabled = !self.config.photon_endpoint.is_empty();
+        let endpoint = self.photon_endpoint_input();
+        let valid_endpoint = photon_api_url(endpoint);
+        let can_save = valid_endpoint.as_ref().is_some_and(|url| url.as_str() != self.config.photon_endpoint);
+        let location_settings = widget::settings::section()
+            .title(fl!("location-suggestions"))
+            .add(widget::text::body(fl!("online-location-description")))
+            .add(
+                widget::text_input(fl!("photon-endpoint"), endpoint)
+                    .on_input(Message::PhotonEndpointChanged),
+            )
+            .add_maybe((valid_endpoint.is_none()).then(|| widget::text::caption(fl!("photon-endpoint-invalid"))))
+            .add(widget::row(vec![
+                widget::button::suggested(if online_enabled {
+                    fl!("online-location-update")
+                } else {
+                    fl!("online-location-enable")
+                })
+                .on_press_maybe(can_save.then_some(Message::SavePhotonEndpoint))
+                .into(),
+                if online_enabled {
+                    widget::button::standard(fl!("online-location-disable"))
+                        .on_press(Message::DisableOnlineLocations)
+                        .into()
+                } else {
+                    widget::button::link(fl!("online-location-about"))
+                        .on_press(Message::LaunchUrl("https://github.com/komoot/photon#demo-server".into()))
+                        .into()
+                },
+            ]).spacing(spacing().space_xs));
+        widget::settings::view_column(vec![appearance.into(), section.into(), location_settings.into()]).into()
+    }
+
+    fn photon_endpoint_input(&self) -> &str {
+        self.photon_endpoint_input.as_deref().unwrap_or_else(|| {
+            if self.config.photon_endpoint.is_empty() {
+                PUBLIC_PHOTON_ENDPOINT
+            } else {
+                &self.config.photon_endpoint
+            }
+        })
+    }
+
+    fn clear_online_locations(&mut self) {
+        self.location_lookup = None;
+        if let Some(state) = &self.editing_event {
+            self.event_locations.clear_online(&state.location);
+        }
     }
 
     fn refresh_display_timezone(&mut self) {
@@ -2356,7 +2466,7 @@ impl AppModel {
                 let storage = self.storage.lock().unwrap();
                 let mut calendars = storage.list_calendars();
                 calendars.sort_by(|a, b| a.name.cmp(&b.name));
-                crate::features::event::view::view(state, &calendars, &self.reminders_model)
+                crate::features::event::view::view(state, &calendars, &self.event_notes, &self.event_locations)
             }
             None => widget::text::body("").into(),
         }
@@ -2399,7 +2509,7 @@ impl AppModel {
 
         for calendar in calendars {
             let color = calendar.color.as_deref().and_then(calendar_color);
-            let icon = calendar_form::sidebar_color_icon(color, calendar.visible);
+            let icon = calendar_form::calendar_color_icon(color, calendar.visible).icon().size(16);
             self.nav
                 .insert()
                 .indent(1)

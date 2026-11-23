@@ -1,19 +1,18 @@
 use cosmic::{
     Element,
     iced::{
-        Background, Length, Task,
+        Length, Task,
         alignment::Horizontal,
         widget::{Id, scrollable, stack, text::Wrapping},
     },
-    style::Button,
     theme::spacing,
-    widget::{self, button::Catalog},
+    widget,
 };
 use time::{Duration, OffsetDateTime, Time};
 
 use super::{
-    event_card_style, event_target, month, slot_style, slot_target, CalendarAnchor, CalendarSlot,
-    Occurrence,
+    CalendarAnchor, CalendarSlot, Occurrence, colored_event_card_style, event_target, slot_style,
+    slot_target,
 };
 use crate::app::{AppModel, Message};
 
@@ -214,29 +213,13 @@ fn event_group<'a>(
         for block in lane {
             let item = block.item;
             let anchor = CalendarAnchor::Grid(date, item.key());
-            let selected = item.selected;
             let height = block.end - block.start;
             let (content, label) = card_content(item, height);
             let button = widget::button::custom(content)
                 .width(Length::Fill)
                 .height(height)
                 .padding([0, spacing().space_xxxs])
-                .class(event_card_style(
-                    move |focused, theme| {
-                        let mut style = theme.active(focused, false, &Button::Standard);
-                        if let Some(Background::Color(color)) = style.background {
-                            let base = theme.current_container().base.into();
-                            let fill = if selected {
-                                month::blend(base, theme.cosmic().accent.base.into(), 0.48)
-                            } else {
-                                month::blend(base, color, color.a)
-                            };
-                            style.background = Some(fill.into());
-                        }
-                        style
-                    },
-                    |theme| theme.disabled(&Button::Standard),
-                ))
+                .class(colored_event_card_style(item, true))
                 .name(label)
                 .on_press(item.open(anchor));
 

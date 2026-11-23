@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    display_time, event_button_style, event_card_style, event_target, slot_target,
-    CalendarAnchor, CalendarSlot, EventSelection, LocalCalendar,
+    CalendarAnchor, CalendarSlot, EventSelection, LocalCalendar, accent_or_calendar_color,
+    colored_event_card_style, display_time, event_button_style, event_target, slot_target,
 };
 
 const DAYS_PER_WEEK: usize = 7;
@@ -40,7 +40,7 @@ pub(super) struct Occurrence {
     pub(super) title: String,
     pub(super) location: Option<String>,
     pub(super) calendar: Option<String>,
-    color: Option<Color>,
+    pub(super) color: Option<Color>,
 }
 
 impl Occurrence {
@@ -393,7 +393,11 @@ fn week_view<'a>(
             };
             widget::button::text(label)
                 .id(day_id(date))
-                .name(fl!("month-day-accessible", date = agenda_date(date), count = count))
+                .name(fl!(
+                    "month-day-accessible",
+                    date = agenda_date(date),
+                    count = count
+                ))
                 .width(Length::Fill)
                 .height(EVENT_HEIGHT)
                 .padding([0, 4])
@@ -471,30 +475,13 @@ fn event_button<'a>(event: &Occurrence, date: Date, app: &'a AppModel) -> Elemen
     }
     content = content.push(widget::text::caption(title.clone()).wrapping(Wrapping::None));
     let label = format!("{time} · {title}");
-    use cosmic::style::Button;
-    use widget::button::Catalog;
-
-    let color = event.color;
-    let selected = event.selected;
-    let style = event_card_style(
-        move |focused, theme| {
-            let mut style = theme.active(focused, false, &Button::MenuItem);
-            style.background = (band || selected).then(|| {
-                let base = theme.current_container().base.into();
-                let accent = accent_or_calendar_color(theme, color);
-                blend(base, accent, if selected { 0.48 } else { 0.22 }).into()
-            });
-            style
-        },
-        |theme| theme.disabled(&Button::MenuItem),
-    );
     let anchor = CalendarAnchor::Month(date, event.key());
     let button = widget::button::custom(content)
         .name(label.clone())
         .padding([0, 4])
         .height(EVENT_HEIGHT)
         .width(Length::Fill)
-        .class(style)
+        .class(colored_event_card_style(event, band))
         .on_press(event.open(anchor));
     widget::tooltip(
         widget::container(event_target(app, button, event, anchor))
@@ -504,10 +491,6 @@ fn event_button<'a>(event: &Occurrence, date: Date, app: &'a AppModel) -> Elemen
         widget::tooltip::Position::Top,
     )
     .into()
-}
-
-fn accent_or_calendar_color(theme: &cosmic::Theme, color: Option<Color>) -> Color {
-    color.unwrap_or_else(|| theme.cosmic().accent_text_color().into())
 }
 
 fn color_dot<'a>(color: Option<Color>) -> Element<'a, Message> {
@@ -589,7 +572,7 @@ pub(super) fn blend(base: Color, accent: Color, amount: f32) -> Color {
     )
 }
 
-pub(super) fn agenda_date(date: Date) -> String {
+pub(crate) fn agenda_date(date: Date) -> String {
     fl!(
         "month-agenda-date",
         weekday = weekday_name(date.weekday()),
@@ -598,7 +581,7 @@ pub(super) fn agenda_date(date: Date) -> String {
     )
 }
 
-pub(super) fn weekday_name(day: Weekday) -> String {
+pub(crate) fn weekday_name(day: Weekday) -> String {
     match day {
         Weekday::Monday => fl!("weekday-mon"),
         Weekday::Tuesday => fl!("weekday-tue"),
@@ -648,6 +631,8 @@ mod tests {
         let mut event = EventEditorState::new(
             CalendarKey::Local(calendar.id),
             start.midnight().assume_utc(),
+            false,
+            String::new(),
         )
         .build_event(None);
         event.time = EventTime::AllDay { start, end: last };

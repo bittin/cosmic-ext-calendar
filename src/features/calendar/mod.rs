@@ -7,8 +7,8 @@ use cosmic::widget::{button, menu};
 use cosmic::{
     Element,
     iced::{
+        Color, Length,
         widget::{mouse_area, text::Wrapping},
-        Length,
     },
     theme::spacing,
     widget,
@@ -110,6 +110,29 @@ fn event_card_style(
             style
         }),
     }
+}
+
+fn colored_event_card_style(event: &Occurrence, filled: bool) -> Button {
+    use button::Catalog;
+
+    let color = event.color;
+    let selected = event.selected;
+    event_card_style(
+        move |focused, theme| {
+            let mut style = theme.active(focused, false, &Button::MenuItem);
+            style.background = (filled || selected).then(|| {
+                let base = theme.current_container().base.into();
+                let accent = accent_or_calendar_color(theme, color);
+                month::blend(base, accent, if selected { 0.48 } else { 0.22 }).into()
+            });
+            style
+        },
+        |theme| theme.disabled(&Button::MenuItem),
+    )
+}
+
+fn accent_or_calendar_color(theme: &cosmic::Theme, color: Option<Color>) -> Color {
+    color.unwrap_or_else(|| theme.cosmic().accent_text_color().into())
 }
 
 fn event_button_style(selected: bool, normal: Button, selection: Button) -> Button {
@@ -233,11 +256,7 @@ fn all_day_cell<'a>(
             widget::button::custom(widget::container(content).width(Length::Fill).clip(true))
                 .width(Length::Fill)
                 .padding([4, 6])
-                .class(event_button_style(
-                    item.selected,
-                    Button::Text,
-                    Button::Standard,
-                ))
+                .class(colored_event_card_style(item, true))
                 .name(label)
                 .on_press(item.open(anchor)),
             item,

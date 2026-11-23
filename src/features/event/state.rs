@@ -4,46 +4,40 @@ use crate::features::event::model::{Event, EventKind, EventTime, Reminder, TaskD
 use crate::fl;
 use crate::shared::ids::EventId;
 use chrono::{Offset, TimeZone};
-use cosmic::widget;
-use time::OffsetDateTime;
+use cosmic::widget::{calendar::CalendarModel, combo_box};
+use time::{Date, OffsetDateTime, Time};
 
-/// The year range offered by the event editor's start-date picker.
-pub const EVENT_EDITOR_YEARS: [i32; 100] = {
-    let mut years = [0; 100];
-    let mut i = 0;
-    while i < 100 {
-        years[i] = 2000 + i as i32;
-        i += 1;
-    }
-    years
-};
-
-/// The minute options offered by the event editor's time pickers.
-pub const EVENT_EDITOR_MINUTES: usize = 60;
-
-pub fn event_editor_months() -> [time::Month; 12] {
-    [
-        time::Month::January,
-        time::Month::February,
-        time::Month::March,
-        time::Month::April,
-        time::Month::May,
-        time::Month::June,
-        time::Month::July,
-        time::Month::August,
-        time::Month::September,
-        time::Month::October,
-        time::Month::November,
-        time::Month::December,
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventDateField {
+    Start,
+    End,
+    Until,
 }
 
-/// Moves `state.start` to `new_start`, keeping the event's duration
-/// constant by shifting `state.end` by the same delta.
-pub fn shift_event_editor_start(state: &mut EventEditorState, new_start: OffsetDateTime) {
-    let duration = state.end - state.start;
-    state.start = new_start;
-    state.end = new_start + duration;
+pub fn clock_label(date: OffsetDateTime) -> String {
+    format!("{:02}:{:02}", date.hour(), date.minute())
+}
+
+fn clock_presets() -> combo_box::State<String> {
+    combo_box::State::new(
+        (0..48)
+            .map(|slot| format!("{:02}:{:02}", slot / 2, slot % 2 * 30))
+            .collect(),
+    )
+}
+
+fn parse_clock(input: &str) -> Option<Time> {
+    let (hour, minute) = input.trim().split_once(':')?;
+    if !(1..=2).contains(&hour.len())
+        || minute.len() != 2
+        || !hour
+            .bytes()
+            .chain(minute.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Time::from_hms(hour.parse().ok()?, minute.parse().ok()?, 0).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,19 +59,37 @@ impl RecurrenceScope {
     }
 }
 
-/// State backing the event creation/editing form shown in the context drawer.
+#[derive(Debug, Clone)]
+struct NewEventDefaults {
+    calendar: CalendarKey,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    all_day: bool,
+    timezone: String,
+}
+
+/// State backing the event creation and editing dialog.
 #[derive(Debug, Clone)]
 pub struct EventEditorState {
     /// `None` while creating a new event; `Some` while editing an existing one.
     pub event_id: Option<EventId>,
+    new_event_defaults: Option<NewEventDefaults>,
     pub calendar: CalendarKey,
     pub summary: String,
+    pub editing_title: bool,
     pub description: String,
     pub location: String,
     pub all_day: bool,
     pub is_task: bool,
     pub start: OffsetDateTime,
     pub end: OffsetDateTime,
+    pub start_clock_input: Option<String>,
+    pub end_clock_input: Option<String>,
+    pub start_clock_presets: combo_box::State<String>,
+    pub end_clock_presets: combo_box::State<String>,
+    pub date_picker: Option<(EventDateField, CalendarModel)>,
+    pub more_options: bool,
+    pub adding_reminder: bool,
     pub timezone: String,
     pub floating: bool,
     pub writing: bool,
@@ -89,9 +101,6 @@ pub struct EventEditorState {
     /// alongside the fixed presets since those don't cover every lead time
     /// someone might want.
     pub custom_reminder_input: String,
-    /// Whether the custom reminder field (a `widget::editable_input`) is
-    /// currently showing its text box rather than its read-only label.
-    pub custom_reminder_editing: bool,
     /// The specific occurrence that was clicked to open this editor (equal
     /// to `start` for non-recurring events and new events), used to record
     /// which single occurrence to exclude via EXDATE on "delete this
@@ -113,39 +122,6 @@ pub fn reminder_label(minutes: i64) -> String {
     } else {
         format!("{minutes}m")
     }
-}
-
-/// Builds the reminders multi-select model: one entry per preset, plus one
-/// for each of `reminders`'s lead times that isn't already covered by a
-/// preset (added via the custom-minutes input). All are activated, since a
-/// non-preset entry only exists in the model because it's in `reminders`;
-/// deactivating one removes it from `reminders` entirely (there's no default
-/// state for it to fall back to) and it disappears next rebuild.
-pub fn build_reminders_model(
-    reminders: &[i64],
-) -> widget::segmented_button::Model<widget::segmented_button::MultiSelect> {
-    let mut minutes_list: Vec<i64> = REMINDER_PRESETS_MINUTES.to_vec();
-    for minutes in reminders {
-        if !minutes_list.contains(minutes) {
-            minutes_list.push(*minutes);
-        }
-    }
-    minutes_list.sort_unstable();
-
-    let mut builder =
-        widget::segmented_button::Model::<widget::segmented_button::MultiSelect>::builder();
-    for minutes in minutes_list {
-        let is_on = reminders.contains(&minutes);
-        builder = builder.insert(|b| {
-            let b = b.text(reminder_label(minutes)).data(minutes);
-            if is_on {
-                b.activate()
-            } else {
-                b
-            }
-        });
-    }
-    builder.build()
 }
 
 fn editor_recurrence(event: &Event) -> RecurrenceRule {
@@ -189,24 +165,44 @@ fn editor_recurrence(event: &Event) -> RecurrenceRule {
 }
 
 impl EventEditorState {
-    pub fn new(calendar: CalendarKey, start: OffsetDateTime) -> Self {
+    pub fn new(
+        calendar: CalendarKey,
+        start: OffsetDateTime,
+        all_day: bool,
+        timezone: String,
+    ) -> Self {
+        let end = start.saturating_add(time::Duration::hours(1));
         Self {
             event_id: None,
+            new_event_defaults: Some(NewEventDefaults {
+                calendar: calendar.clone(),
+                start,
+                end,
+                all_day,
+                timezone: timezone.clone(),
+            }),
             calendar,
             summary: String::new(),
+            editing_title: true,
             description: String::new(),
             location: String::new(),
-            all_day: false,
+            all_day,
             is_task: false,
             start,
-            end: start + time::Duration::hours(1),
-            timezone: String::new(),
+            end,
+            start_clock_input: None,
+            end_clock_input: None,
+            start_clock_presets: clock_presets(),
+            end_clock_presets: clock_presets(),
+            date_picker: None,
+            more_options: false,
+            adding_reminder: false,
+            timezone,
             floating: false,
             writing: false,
             recurrence: RecurrenceRule::NONE,
             reminders: Vec::new(),
             custom_reminder_input: String::new(),
-            custom_reminder_editing: false,
             occurrence_start: start,
             recurring_series: false,
             recurrence_scope: RecurrenceScope::Series,
@@ -225,14 +221,23 @@ impl EventEditorState {
 
         Self {
             event_id: Some(event.id),
+            new_event_defaults: None,
             calendar: event.calendar.clone(),
             summary: event.summary.clone(),
+            editing_title: false,
             description: event.description.clone().unwrap_or_default(),
             location: event.location.clone().unwrap_or_default(),
             all_day,
             is_task: matches!(event.kind, EventKind::Task(_)),
             start,
             end,
+            start_clock_input: None,
+            end_clock_input: None,
+            start_clock_presets: clock_presets(),
+            end_clock_presets: clock_presets(),
+            date_picker: None,
+            more_options: event.floating || event.timezone.is_some(),
+            adding_reminder: false,
             timezone: event.timezone.clone().unwrap_or_default(),
             floating: event.floating,
             writing: false,
@@ -243,7 +248,6 @@ impl EventEditorState {
                 .map(|reminder| reminder.minutes_before)
                 .collect(),
             custom_reminder_input: String::new(),
-            custom_reminder_editing: false,
             occurrence_start,
             recurring_series: event.is_recurring(),
             recurrence_scope: RecurrenceScope::Series,
@@ -271,6 +275,96 @@ impl EventEditorState {
         let shift = if is_series { -shift } else { shift };
         self.start = self.start.saturating_add(shift);
         self.end = self.end.saturating_add(shift);
+        self.start_clock_input = None;
+        self.end_clock_input = None;
+        self.reset_clock_search(true);
+        self.reset_clock_search(false);
+        self.date_picker = None;
+    }
+
+    pub fn can_dismiss_with_escape(&self) -> bool {
+        let Some(defaults) = &self.new_event_defaults else {
+            return false;
+        };
+        let invalid_clock = [&self.start_clock_input, &self.end_clock_input]
+            .into_iter()
+            .filter_map(|input| input.as_deref())
+            .any(|input| parse_clock(input).is_none());
+
+        !self.writing
+            && self.calendar == defaults.calendar
+            && self.start == defaults.start
+            && self.end == defaults.end
+            && self.all_day == defaults.all_day
+            && self.timezone == defaults.timezone
+            && self.summary.is_empty()
+            && self.description.is_empty()
+            && self.location.is_empty()
+            && !self.is_task
+            && !self.floating
+            && self.recurrence.freq == super::recurrence::RecurrenceFreq::None
+            && self.reminders.is_empty()
+            && self.custom_reminder_input.is_empty()
+            && !invalid_clock
+    }
+
+    pub fn date(&self, field: EventDateField) -> Option<Date> {
+        match field {
+            EventDateField::Start => Some(self.start.date()),
+            EventDateField::End => Some(self.end.date()),
+            EventDateField::Until => match self.recurrence.end {
+                RecurrenceEnd::Until(date) => Some(date),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn select_date(&mut self, field: EventDateField, date: Date) {
+        match field {
+            EventDateField::Start => self.move_start(self.start.replace_date(date)),
+            EventDateField::End => self.end = self.end.replace_date(date),
+            EventDateField::Until => self.recurrence.end = RecurrenceEnd::Until(date),
+        }
+    }
+
+    pub fn input_clock(&mut self, is_start: bool, input: String) {
+        if let Some(time) = parse_clock(&input) {
+            if is_start {
+                self.move_start(self.start.replace_time(time));
+            } else {
+                self.end = self.end.replace_time(time);
+            }
+        }
+        if is_start {
+            self.start_clock_input = Some(input);
+        } else {
+            self.end_clock_input = Some(input);
+        }
+    }
+
+    pub fn reset_clock_search(&mut self, is_start: bool) {
+        if is_start {
+            self.start_clock_presets = clock_presets();
+        } else {
+            self.end_clock_presets = clock_presets();
+        }
+    }
+
+    fn move_start(&mut self, start: OffsetDateTime) {
+        let duration = self.end - self.start;
+        let end = start.saturating_add(duration);
+        if end.time() != self.end.time()
+            && self
+                .end_clock_input
+                .as_deref()
+                .and_then(parse_clock)
+                .is_some()
+        {
+            self.end_clock_input = None;
+            self.reset_clock_search(false);
+        }
+        self.start = start;
+        self.end = end;
     }
 
     fn zoned_time(&self, value: OffsetDateTime) -> Option<OffsetDateTime> {
@@ -307,7 +401,16 @@ impl EventEditorState {
     }
 
     pub fn validation_error(&self) -> Option<String> {
+        if !self.all_day
+            && [&self.start_clock_input, &self.end_clock_input]
+                .into_iter()
+                .filter_map(|input| input.as_deref())
+                .any(|input| parse_clock(input).is_none())
+        {
+            return Some(fl!("event-invalid-clock"));
+        }
         if self.recurrence_scope != RecurrenceScope::Occurrence
+            && self.recurrence.freq != super::recurrence::RecurrenceFreq::None
             && matches!(self.recurrence.end, RecurrenceEnd::Until(date) if date < self.start.date())
         {
             return Some(fl!("invalid-recurrence-end"));
@@ -439,5 +542,78 @@ impl EventEditorState {
             updated_at: now,
             sequence: existing.map_or(0, |event| event.sequence + 1),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::ids::CalendarId;
+
+    fn editor() -> EventEditorState {
+        EventEditorState::new(
+            CalendarKey::Local(CalendarId::new()),
+            Date::from_calendar_date(2026, time::Month::November, 22)
+                .unwrap()
+                .with_hms(9, 0, 0)
+                .unwrap()
+                .assume_utc(),
+            false,
+            String::new(),
+        )
+    }
+
+    #[test]
+    fn escape_only_dismisses_an_unchanged_new_event() {
+        let mut state = editor();
+        state.more_options = true;
+        assert!(state.can_dismiss_with_escape());
+
+        state.summary = "Lunch".into();
+        assert!(!state.can_dismiss_with_escape());
+        state.summary.clear();
+        assert!(state.can_dismiss_with_escape());
+
+        state.input_clock(true, "09:".into());
+        assert!(!state.can_dismiss_with_escape());
+        state.input_clock(true, "09:00".into());
+        assert!(state.can_dismiss_with_escape());
+
+        state.writing = true;
+        assert!(!state.can_dismiss_with_escape());
+        let event = editor().build_event(None);
+        assert!(!EventEditorState::from_event(&event, event.start()).can_dismiss_with_escape());
+    }
+
+    #[test]
+    fn changing_the_start_date_and_time_preserves_duration() {
+        let mut state = editor();
+        let next = state.start.date().next_day().unwrap();
+        state.select_date(EventDateField::Start, next);
+        state.input_clock(false, "10:00".into());
+        state.input_clock(true, "23:30".into());
+
+        assert_eq!(state.start.date(), next);
+        assert_eq!(state.end.date(), next.next_day().unwrap());
+        assert_eq!(clock_label(state.end), "00:30");
+        assert_eq!(state.end - state.start, time::Duration::hours(1));
+        assert!(state.end_clock_input.is_none());
+    }
+
+    #[test]
+    fn invalid_clock_text_blocks_saving_timed_events_only() {
+        let mut state = editor();
+        let original = state.start;
+        state.input_clock(true, "24:00".into());
+        assert_eq!(state.start, original);
+        assert!(state.validation_error().is_some());
+
+        state.all_day = true;
+        assert!(state.validation_error().is_none());
+
+        state.all_day = false;
+        state.input_clock(true, "9:45".into());
+        assert_eq!(clock_label(state.start), "09:45");
+        assert!(state.validation_error().is_none());
     }
 }

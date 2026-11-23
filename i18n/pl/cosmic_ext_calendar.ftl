@@ -110,3 +110,25 @@ calendar-color-default = Domyślny kolor
 calendar-color-recent = Ostatnie kolory
 calendar-color-copy = Kopiuj do schowka
 calendar-color-copied = Skopiowano do schowka
+
+event-title = Tytuł wydarzenia
+event-date-label = { $date } { $year }
+event-invalid-clock = Wpisz prawidłową godzinę w formacie GG:MM.
+event-calendar = Kalendarz
+event-notes = Notatki
+event-more-options = Więcej opcji
+event-add-reminder = Dodaj przypomnienie
+event-remove-reminder = Usuń przypomnienie
+event-add-custom-reminder = Dodaj
+
+location-suggestions = Sugestie lokalizacji
+online-location-enable = Włącz wyszukiwanie online
+online-location-disable = Wyłącz wyszukiwanie online
+online-location-save-error = Nie udało się zapisać ustawień wyszukiwania lokalizacji online.
+online-location-unavailable = Sugestie online są niedostępne.
+online-location-description = Użyj Photon do wyszukiwania adresów i miejsc. Po włączeniu zapytania są wysyłane do poniższego serwera. Publiczny serwer demonstracyjny jest przeznaczony do sporadycznego użytku.
+photon-endpoint = Adres URL serwera Photon
+photon-endpoint-invalid = Wpisz adres URL serwera Photon z protokołem HTTP lub HTTPS.
+online-location-update = Zmień serwer
+online-location-about = Informacje o serwerze publicznym
+online-location-attribution = Photon · © Autorzy OpenStreetMap
