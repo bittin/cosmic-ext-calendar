@@ -90,14 +90,6 @@ impl EventIndex {
         results.sort_by_key(|event| event_sort_key(event));
         results
     }
-
-    pub fn len(&self) -> usize {
-        self.by_id.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
-    }
 }
 
 fn event_sort_key(event: &Event) -> OffsetDateTime {

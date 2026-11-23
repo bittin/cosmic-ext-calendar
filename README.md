@@ -1,4 +1,4 @@
-# Cosmic Ext Calendar
+# Calendar
 
 A calendar application for the COSMIC desktop
 

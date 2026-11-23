@@ -3,7 +3,7 @@
   <id>dev.edfloreshz.Calendar</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
-  <name>Cosmic Ext Calendar</name>
+  <name>Calendar</name>
   <summary>Plan events on the COSMIC desktop</summary>
   <description>
     <p>Organize events in local calendars and view your schedule by month, week, or day.</p>
@@ -39,4 +39,3 @@
   </keywords>
   <content_rating type="oars-1.1" />
 </component>
-
