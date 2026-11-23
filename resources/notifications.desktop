@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Calendar Event Alerts
+Name[pl]=Alerty wydarzeń kalendarza
+Exec=cosmic-ext-calendar --notification-worker
+TryExec=cosmic-ext-calendar
+Terminal=false
+StartupNotify=false
+NoDisplay=true

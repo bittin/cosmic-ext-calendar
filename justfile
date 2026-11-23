@@ -3,6 +3,7 @@ appid := 'dev.edfloreshz.Calendar'
 
 rootdir := ''
 prefix := '/usr'
+sysconfdir := '/etc'
 
 base-dir := absolute_path(clean(rootdir / prefix))
 
@@ -12,6 +13,8 @@ bin-dst := base-dir / 'bin' / name
 desktop := appid + '.desktop'
 desktop-src := 'resources' / desktop
 desktop-dst := clean(rootdir / prefix) / 'share' / 'applications' / desktop
+
+autostart-dst := clean(rootdir / sysconfdir) / 'xdg' / 'autostart' / (appid + '.Notifications.desktop')
 
 appdata := appid + '.metainfo.xml'
 appdata-src := 'resources' / appdata
@@ -62,12 +65,13 @@ run *args:
 install:
     install -Dm0755 {{bin-src}} {{bin-dst}}
     install -Dm0644 resources/app.desktop {{desktop-dst}}
+    install -Dm0644 resources/notifications.desktop {{autostart-dst}}
     install -Dm0644 resources/app.metainfo.xml {{appdata-dst}}
     install -Dm0644 {{icon-svg-src}} {{icon-svg-dst}}
 
 # Uninstalls installed files
 uninstall:
-    rm {{bin-dst}} {{desktop-dst}} {{icon-svg-dst}}
+    rm {{bin-dst}} {{desktop-dst}} {{icon-svg-dst}} {{autostart-dst}}
 
 # Vendor dependencies locally
 vendor:

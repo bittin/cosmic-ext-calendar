@@ -24,4 +24,5 @@ jobs:
           just rootdir="$RUNNER_TEMP/staging" bin-src=target/debug/cosmic-ext-calendar install
           test -x "$RUNNER_TEMP/staging/usr/bin/cosmic-ext-calendar"
           desktop-file-validate "$RUNNER_TEMP/staging/usr/share/applications/dev.edfloreshz.Calendar.desktop"
+          desktop-file-validate "$RUNNER_TEMP/staging/etc/xdg/autostart/dev.edfloreshz.Calendar.Notifications.desktop"
           appstreamcli validate --no-net "$RUNNER_TEMP/staging/usr/share/appdata/dev.edfloreshz.Calendar.metainfo.xml"

@@ -193,3 +193,5 @@ event-alert-numbered =
         [rd] { $number }rd Alert
        *[th] { $number }th Alert
     }
+
+notification-untitled-event = Untitled event

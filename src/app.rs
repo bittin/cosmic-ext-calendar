@@ -33,7 +33,7 @@ pub use flags::*;
 mod settings;
 pub use settings::*;
 
-use crate::features::event::notifications::{ReminderKey, check_reminders};
+use crate::features::event::notifications::{CHECK_INTERVAL, check_alerts};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
@@ -121,10 +121,7 @@ pub struct AppModel {
     // Current text in the header search bar; non-empty replaces the main
     // view with search results.
     search_query: String,
-    // Reminders already notified this session, so the periodic check
-    // doesn't re-fire the same notification every tick.
-    fired_reminders: std::collections::HashSet<ReminderKey>,
-    checking_reminders: bool,
+    checking_alerts: bool,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -221,8 +218,8 @@ pub enum Message {
     SetEventAlert(usize, Option<i64>),
     EditCustomEventAlert(usize, String),
     RemoveEventAlert(usize),
-    CheckReminders,
-    RemindersFired(Vec<ReminderKey>),
+    CheckAlerts,
+    AlertsChecked,
 }
 
 /// Create a COSMIC application from the app model
@@ -327,8 +324,7 @@ impl cosmic::Application for AppModel {
             calendar_nav_ids: Vec::new(),
             calendars_collapsed: false,
             search_query: String::new(),
-            fired_reminders: std::collections::HashSet::new(),
-            checking_reminders: false,
+            checking_alerts: false,
         };
 
         let mut tasks = Vec::new();
@@ -363,6 +359,7 @@ impl cosmic::Application for AppModel {
         app.core.nav_bar_set_toggled(false);
 
         tasks.push(app.update_title());
+        tasks.push(cosmic::task::message(Message::CheckAlerts));
         tasks.push(cosmic::command::set_theme(app.config.app_theme.theme()));
 
         app.refresh_display_timezone();
@@ -735,8 +732,7 @@ impl cosmic::Application for AppModel {
     /// emit messages to the application through a channel. They are started at the
     /// beginning of the application, and persist through its lifetime.
     fn subscription(&self) -> Subscription<Self::Message> {
-        let reminders_tick = cosmic::iced::time::every(std::time::Duration::from_secs(30))
-            .map(|_| Message::CheckReminders);
+        let alerts_tick = cosmic::iced::time::every(CHECK_INTERVAL).map(|_| Message::CheckAlerts);
 
         let config_updates = self
             .core()
@@ -790,7 +786,7 @@ impl cosmic::Application for AppModel {
         } else {
             Subscription::none()
         };
-        Subscription::batch([reminders_tick, config_updates, month_shortcuts, editor_escape])
+        Subscription::batch([alerts_tick, config_updates, month_shortcuts, editor_escape])
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -1776,32 +1772,24 @@ impl cosmic::Application for AppModel {
                     }
                 }
             }
-            Message::CheckReminders => {
+            Message::CheckAlerts => {
                 self.refresh_display_timezone();
-                if self.checking_reminders {
-                    return Task::none();
+                if !self.checking_alerts {
+                    self.checking_alerts = true;
+                    tasks.push(Task::perform(
+                        async { tokio::task::spawn_blocking(check_alerts).await },
+                        |result| {
+                            match result {
+                                Ok(Ok(())) => {}
+                                Ok(Err(err)) => tracing::warn!("could not check event alerts: {err}"),
+                                Err(err) => tracing::warn!("event alert check stopped: {err}"),
+                            }
+                            cosmic::action::app(Message::AlertsChecked)
+                        },
+                    ));
                 }
-                self.checking_reminders = true;
-                let oldest = OffsetDateTime::now_utc() - time::Duration::days(1);
-                self.fired_reminders
-                    .retain(|(_, occurrence, _)| *occurrence >= oldest);
-                let storage = self.storage.clone();
-                let already_fired = self.fired_reminders.clone();
-                tasks.push(Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            check_reminders(&storage, &already_fired)
-                        })
-                        .await
-                        .unwrap_or_default()
-                    },
-                    |fired| cosmic::action::app(Message::RemindersFired(fired)),
-                ));
             }
-            Message::RemindersFired(fired) => {
-                self.checking_reminders = false;
-                self.fired_reminders.extend(fired);
-            }
+            Message::AlertsChecked => self.checking_alerts = false,
             Message::ShowDayAgenda(date) => {
                 self.calendar
                     .set_date(self.calendar.selected_date.replace_date(date));

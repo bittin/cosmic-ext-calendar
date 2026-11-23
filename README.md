@@ -14,6 +14,13 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 - `just check` runs clippy on the project to check for linter warnings
 - `just check-json` can be used by IDEs that support LSP
 
+## Event alerts
+
+Set one or more alerts in the event editor to receive desktop notifications.
+After `just install`, the notification worker starts at your next graphical
+login and keeps checking alerts when Calendar is closed. When running Calendar
+directly from the source tree, the open window checks alerts as well.
+
 ## Translators
 
 [Fluent][fluent] is used for localization of the software. Fluent's translation files are found in the [i18n directory](./i18n). New translations may copy the [English (en) localization](./i18n/en) of the project, rename `en` to the desired [ISO 639-1 language code][iso-codes], and then translations can be provided for each [message identifier][fluent-guide]. If no translation is necessary, the message may be omitted.

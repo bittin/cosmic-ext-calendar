@@ -156,3 +156,5 @@ event-alert-days =
 event-alert-none = Brak
 event-alert-first = Alert
 event-alert-numbered = { $number }. alert
+
+notification-untitled-event = Wydarzenie bez tytułu

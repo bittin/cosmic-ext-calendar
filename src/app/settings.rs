@@ -1,9 +1,9 @@
 use cosmic::app::Settings;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::shared::i18n;
 
-pub fn settings() -> Settings {
+pub fn init_runtime() {
     // Get the system's preferred languages.
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
 
@@ -20,7 +20,9 @@ pub fn settings() -> Settings {
         .with(EnvFilter::from_env("RUST_LOG"))
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
 
+pub fn settings() -> Settings {
     // Settings for configuring the application window and iced runtime.
     Settings::default().size_limits(
         cosmic::iced::Limits::NONE
