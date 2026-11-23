@@ -16,7 +16,7 @@ use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::dialog::file_chooser;
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::{Alignment, Length, Subscription};
+use cosmic::iced::{Alignment, Length, Subscription, window};
 use cosmic::prelude::*;
 use cosmic::theme::spacing;
 use cosmic::widget::{color_picker::ColorPickerUpdate, segmented_button::SingleSelect};
@@ -122,6 +122,7 @@ pub struct AppModel {
     // view with search results.
     search_query: String,
     checking_alerts: bool,
+    keep_running: bool,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -218,6 +219,8 @@ pub enum Message {
     SetEventAlert(usize, Option<i64>),
     EditCustomEventAlert(usize, String),
     RemoveEventAlert(usize),
+    MainWindowClosed,
+    MainWindowOpened,
     CheckAlerts,
     AlertsChecked,
 }
@@ -247,7 +250,7 @@ impl cosmic::Application for AppModel {
     /// Initializes the application with any given flags and startup commands.
     fn init(
         core: cosmic::Core,
-        _flags: Self::Flags,
+        flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
         // Create a nav bar with three page items.
         let nav = nav_bar::Model::default();
@@ -325,6 +328,7 @@ impl cosmic::Application for AppModel {
             calendars_collapsed: false,
             search_query: String::new(),
             checking_alerts: false,
+            keep_running: flags.keep_running,
         };
 
         let mut tasks = Vec::new();
@@ -358,7 +362,11 @@ impl cosmic::Application for AppModel {
 
         app.core.nav_bar_set_toggled(false);
 
-        tasks.push(app.update_title());
+        if app.keep_running {
+            tasks.push(app.open_main_window());
+        } else {
+            tasks.push(app.update_title());
+        }
         tasks.push(cosmic::task::message(Message::CheckAlerts));
         tasks.push(cosmic::command::set_theme(app.config.app_theme.theme()));
 
@@ -1772,6 +1780,11 @@ impl cosmic::Application for AppModel {
                     }
                 }
             }
+            Message::MainWindowClosed => {
+                self.core.set_main_window_id(None);
+                self.calendar_popup = None;
+            }
+            Message::MainWindowOpened => return self.update_title(),
             Message::CheckAlerts => {
                 self.refresh_display_timezone();
                 if !self.checking_alerts {
@@ -1881,6 +1894,20 @@ impl cosmic::Application for AppModel {
         _new_theme: &cosmic_theme::Theme,
     ) -> Task<cosmic::Action<Message>> {
         cosmic::command::set_theme(self.config.app_theme.theme())
+    }
+
+    fn on_close_requested(&self, id: window::Id) -> Option<Message> {
+        (self.keep_running && self.core.main_window_is(id)).then_some(Message::MainWindowClosed)
+    }
+
+    fn dbus_activation(
+        &mut self,
+        _message: cosmic::dbus_activation::Message,
+    ) -> Task<cosmic::Action<Message>> {
+        if let Some(id) = self.core.main_window_id() {
+            return window::gain_focus(id);
+        }
+        self.open_main_window()
     }
 
     fn on_window_resize(&mut self, id: cosmic::iced::window::Id, width: f32, _height: f32) {
@@ -2412,19 +2439,20 @@ impl AppModel {
             .on_press(Message::OpenRepositoryUrl)
             .padding(0);
 
+        let version: Element<'a, Message> = if hash.is_empty() || hash == "VERGEN_IDEMPOTENT_OUTPUT" {
+            widget::text(env!("CARGO_PKG_VERSION")).into()
+        } else {
+            widget::button::link(fl!("git-description", hash = short_hash.as_str(), date = date))
+                .on_press(Message::LaunchUrl(format!("{REPOSITORY}/commits/{hash}")))
+                .padding(0)
+                .into()
+        };
+
         widget::column(Vec::new())
             .push(icon)
             .push(title)
             .push(link)
-            .push(
-                widget::button::link(fl!(
-                    "git-description",
-                    hash = short_hash.as_str(),
-                    date = date
-                ))
-                .on_press(Message::LaunchUrl(format!("{REPOSITORY}/commits/{hash}")))
-                .padding(0),
-            )
+            .push(version)
             .align_x(Alignment::Center)
             .spacing(space_xxs)
             .into()
@@ -2553,6 +2581,23 @@ impl AppModel {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    fn open_main_window(&mut self) -> Task<cosmic::Action<Message>> {
+        let mut settings = window::Settings {
+            min_size: Some(MIN_WINDOW_SIZE),
+            decorations: false,
+            transparent: true,
+            ..window::Settings::default()
+        };
+        #[cfg(target_os = "linux")]
+        {
+            settings.platform_specific.application_id = <Self as cosmic::Application>::APP_ID.to_owned();
+        }
+
+        let (id, open) = window::open(settings);
+        self.core.set_main_window_id(Some(id));
+        open.map(|_| cosmic::action::app(Message::MainWindowOpened))
     }
 
     /// Updates the header and window titles.

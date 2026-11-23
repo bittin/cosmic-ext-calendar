@@ -11,13 +11,11 @@ bin-src := 'target' / 'release' / name
 bin-dst := base-dir / 'bin' / name
 
 desktop := appid + '.desktop'
-desktop-src := 'resources' / desktop
 desktop-dst := clean(rootdir / prefix) / 'share' / 'applications' / desktop
 
 autostart-dst := clean(rootdir / sysconfdir) / 'xdg' / 'autostart' / (appid + '.Notifications.desktop')
 
 appdata := appid + '.metainfo.xml'
-appdata-src := 'resources' / appdata
 appdata-dst := clean(rootdir / prefix) / 'share' / 'appdata' / appdata
 
 icons-src := 'resources' / 'icons' / 'hicolor'
@@ -98,3 +96,18 @@ vendor-extract:
     rm -rf vendor
     tar pxf vendor.tar
 
+# Regenerates the Flatpak dependency manifest from Cargo.lock
+flatpak-cargo-sources:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scratch=$(mktemp -d flatpak/.cargo-sources.XXXXXX)
+    trap 'rm -rf "$scratch"' EXIT
+    curl -fsSL https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py -o "$scratch/generator.py"
+    python3 -m venv "$scratch/.venv"
+    "$scratch/.venv/bin/python" -m pip install 'aiohttp>=3.9.5,<4' 'tomlkit>=0.13.3,<1'
+    "$scratch/.venv/bin/python" "$scratch/generator.py" Cargo.lock -o "$scratch/cargo-sources.json"
+    mv "$scratch/cargo-sources.json" flatpak/cargo-sources.json
+
+# Builds the Flatpak with the dependencies declared in its manifest
+flatpak *args:
+    flatpak-builder --user --force-clean {{args}} .flatpak-builder/build-dir flatpak/{{appid}}.json

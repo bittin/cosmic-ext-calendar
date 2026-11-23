@@ -1,0 +1,48 @@
+{
+  "id": "dev.edfloreshz.Calendar",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "26.08",
+  "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "cosmic-ext-calendar",
+  "finish-args": [
+    "--share=ipc",
+    "--share=network",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=com.system76.CosmicSettingsDaemon",
+    "--talk-name=com.system76.CosmicSettingsDaemon.*",
+    "--filesystem=xdg-config/cosmic:ro"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin"
+  },
+  "modules": [
+    {
+      "name": "calendar",
+      "buildsystem": "simple",
+      "build-options": {
+        "env": {
+          "CARGO_HOME": "/run/build/calendar/cargo"
+        }
+      },
+      "build-commands": [
+        "cargo build --release --frozen",
+        "install -Dm0755 target/release/cosmic-ext-calendar /app/bin/cosmic-ext-calendar",
+        "install -Dm0644 resources/app.desktop /app/share/applications/dev.edfloreshz.Calendar.desktop",
+        "install -Dm0644 resources/app.metainfo.xml /app/share/metainfo/dev.edfloreshz.Calendar.metainfo.xml",
+        "install -Dm0644 resources/icons/hicolor/scalable/apps/icon.svg /app/share/icons/hicolor/scalable/apps/dev.edfloreshz.Calendar.svg"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "..",
+          "skip": [".cargo", ".git", ".flatpak-builder", ".flatpak-cargo", "target", "vendor", "vendor.tar"]
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ]
+}

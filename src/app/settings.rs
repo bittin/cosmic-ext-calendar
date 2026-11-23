@@ -22,11 +22,16 @@ pub fn init_runtime() {
         .init();
 }
 
-pub fn settings() -> Settings {
+pub const MIN_WINDOW_SIZE: cosmic::iced::Size = cosmic::iced::Size::new(360.0, 180.0);
+
+pub fn settings(keep_running: bool) -> Settings {
     // Settings for configuring the application window and iced runtime.
-    Settings::default().size_limits(
-        cosmic::iced::Limits::NONE
-            .min_width(360.0)
-            .min_height(180.0),
-    )
+    Settings::default()
+        .size_limits(
+            cosmic::iced::Limits::NONE
+                .min_width(MIN_WINDOW_SIZE.width)
+                .min_height(MIN_WINDOW_SIZE.height),
+        )
+        .exit_on_close(!keep_running)
+        .no_main_window(keep_running)
 }

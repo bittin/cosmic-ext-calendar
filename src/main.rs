@@ -17,5 +17,11 @@ fn main() -> cosmic::iced::Result {
         return Ok(());
     }
 
-    cosmic::app::run::<app::AppModel>(app::settings(), app::flags())
+    let flags = app::flags();
+    let settings = app::settings(flags.keep_running);
+    if flags.keep_running {
+        cosmic::app::run_single_instance::<app::AppModel>(settings, flags)
+    } else {
+        cosmic::app::run::<app::AppModel>(settings, flags)
+    }
 }
