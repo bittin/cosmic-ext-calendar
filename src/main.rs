@@ -3,6 +3,8 @@
 mod app;
 mod features;
 mod shared;
+pub mod config;
+pub mod i18n;
 
 pub use shared::error::{Error, Result};
 

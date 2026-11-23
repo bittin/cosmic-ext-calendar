@@ -9,7 +9,7 @@ use crate::features::event::recurrence::{RecurrenceEnd, RecurrenceFreq};
 use crate::features::event::state::{AlertDraft, EventDateField, EventEditorState, RecurrenceScope};
 use crate::features::ics;
 use crate::fl;
-use crate::shared::config::{AppTheme, Config};
+use crate::config::{AppTheme, Config};
 use crate::shared::ids::{CalendarId, EventId};
 use crate::shared::storage::LocalStorage;
 use cosmic::app::context_drawer;

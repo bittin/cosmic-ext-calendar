@@ -1,7 +1,7 @@
 use cosmic::app::Settings;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::shared::i18n;
+use crate::i18n;
 
 pub fn init_runtime() {
     // Get the system's preferred languages.
