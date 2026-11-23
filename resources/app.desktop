@@ -6,5 +6,5 @@ Icon=dev.edfloreshz.Calendar
 Exec=cosmic-ext-calendar %F
 Terminal=false
 StartupNotify=true
-Categories=Office;Calendar;COSMIC;
+Categories=Office;Calendar;
 Keywords=Calendar;Events;Schedule;COSMIC;
