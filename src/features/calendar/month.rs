@@ -477,20 +477,16 @@ fn event_button<'a>(event: &Occurrence, date: Date, app: &'a AppModel) -> Elemen
     let label = format!("{time} · {title}");
     let anchor = CalendarAnchor::Month(date, event.key());
     let button = widget::button::custom(content)
-        .name(label.clone())
+        .name(label)
         .padding([0, 4])
         .height(EVENT_HEIGHT)
         .width(Length::Fill)
         .class(colored_event_card_style(event, band))
         .on_press(event.open(anchor));
-    widget::tooltip(
-        widget::container(event_target(app, button, event, anchor))
-            .width(Length::Fill)
-            .clip(true),
-        widget::text::caption(label),
-        widget::tooltip::Position::Top,
-    )
-    .into()
+    widget::container(event_target(app, button, event, anchor))
+        .width(Length::Fill)
+        .clip(true)
+        .into()
 }
 
 fn color_dot<'a>(color: Option<Color>) -> Element<'a, Message> {
