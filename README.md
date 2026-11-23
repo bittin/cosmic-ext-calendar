@@ -1,6 +1,9 @@
-# Calendar
-
-A calendar application for the COSMIC desktop
+<div align="center">
+    <img src="resources/icons/hicolor/scalable/apps/icon.svg" width="300"/>
+    <h1>Calendar</h1>
+    <h3>Never miss a thing!</h3>
+    <p>A calendar application for the COSMIC desktop</p>
+</div>
 
 ## Installation
 
