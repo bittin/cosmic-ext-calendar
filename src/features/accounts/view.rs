@@ -7,7 +7,7 @@ use crate::{
     fl,
 };
 
-use super::{AccountsAction, Error, SyncStatus};
+use super::{AccountsAction, SyncStatus};
 
 /// Accounts section rendered inside Calendar's Settings drawer.
 ///
@@ -16,39 +16,27 @@ use super::{AccountsAction, Error, SyncStatus};
 /// each one locally.
 pub fn settings_view(app: &AppModel) -> Element<'_, Message> {
     let mut section = widget::settings::section().title(fl!("accounts"));
-    section = section.add(
-        widget::settings::item::builder(fl!("manage-accounts"))
-            .description(fl!("manage-accounts-description"))
-            .control(
-                widget::button::standard(fl!("open"))
-                    .on_press(Message::Accounts(AccountsAction::OpenAccountsApp)),
-            ),
-    );
-
     if !app.accounts_checked() {
-        return section
-            .add(widget::text::body(fl!("accounts-checking")))
-            .into();
+        section = section.add(widget::text::body(fl!("accounts-checking")));
+    } else if let Some(error) = app.accounts_error() {
+        section = section.add(widget::text::body(error.text()));
+    } else if app.accounts().is_empty() {
+        section = section.add(widget::text::body(fl!("no-accounts-connected")));
     }
 
-    if let Some(error) = app.accounts_error() {
-        return section.add(widget::text::body(error.text())).into();
-    }
-
-    let accounts = app.accounts();
-    if accounts.is_empty() {
-        return section
-            .add(widget::text::body(fl!("no-accounts-connected")))
-            .into();
-    }
-
-    for account in accounts {
+    for account in app.accounts() {
         let id = account.id;
         let enabled = app.account_locally_enabled(id);
         let status = app.account_sync_status(id);
         let mut row = widget::settings::item::builder(account.label());
         if enabled {
             match status {
+                Some(SyncStatus::Running {
+                    previous_error: Some(error),
+                    ..
+                }) => {
+                    row = row.description(fl!("accounts-retrying", error = error.text()));
+                }
                 Some(SyncStatus::Running { .. }) => row = row.description(fl!("accounts-syncing")),
                 Some(SyncStatus::Finished(_, Some(error))) => row = row.description(error.text()),
                 Some(SyncStatus::Finished(_, None)) => {
@@ -65,25 +53,17 @@ pub fn settings_view(app: &AppModel) -> Element<'_, Message> {
         let toggle = widget::toggler(enabled).on_toggle(move |enabled| {
             Message::Accounts(AccountsAction::SetLocallyEnabled(id, enabled))
         });
-        let mut controls = widget::row::with_children(vec![toggle.into()])
-            .spacing(cosmic::theme::spacing().space_xs)
-            .align_y(cosmic::iced::Alignment::Center);
-        if enabled
-            && !matches!(
-                status,
-                Some(
-                    SyncStatus::Running { .. }
-                        | SyncStatus::Finished(_, Some(Error::MicrosoftGraphRequired))
-                )
-            )
-        {
-            controls = controls.push(
-                widget::button::standard(fl!("accounts-sync-now"))
-                    .on_press(Message::Accounts(AccountsAction::Sync(id))),
-            );
-        }
-        section = section.add(row.control(controls));
+        section = section.add(row.control(toggle));
     }
 
-    section.into()
+    section
+        .add(
+            widget::settings::item::builder(fl!("manage-accounts"))
+                .description(fl!("manage-accounts-description"))
+                .control(
+                    widget::button::standard(fl!("open"))
+                        .on_press(Message::Accounts(AccountsAction::OpenAccountsApp)),
+                ),
+        )
+        .into()
 }

@@ -222,8 +222,8 @@ accounts-error-consent-timeout = The Accounts request timed out.
 accounts-error-failed = Accounts could not complete the request.
 accounts-error-unsupported = This account is not supported.
 accounts-syncing = Syncing calendars…
+accounts-retrying = Retrying sync. Last error: { $error }
 accounts-no-calendars = No calendars found.
-accounts-sync-now = Sync now
 accounts-error-microsoft-graph = Microsoft calendar sync requires Microsoft Graph support.
 
 keyboard-shortcuts = Keyboard shortcuts

@@ -8,9 +8,9 @@ use cosmic::widget::{self, menu, nav_bar};
 use cosmic::Application;
 use uuid::Uuid;
 
-use super::{AppModel, Message};
+use super::{AppModel, ContextPage, Message};
 use crate::config::Config;
-use crate::features::accounts::{Account, AccountsAction, SyncStatus};
+use crate::features::accounts::{Account, AccountsAction, Error, SyncStatus};
 use crate::features::calendar_management::{
     model::{calendar_color, CalendarKey},
     view::calendar_color_icon,
@@ -48,6 +48,7 @@ struct Row {
     label: String,
     indent: u16,
     icon: Icon,
+    refresh: bool,
 }
 
 #[derive(Default)]
@@ -57,7 +58,22 @@ pub(super) struct Sidebar {
 }
 
 impl Sidebar {
-    fn group(&self, group: Group, label: String, failed: bool, rows: &mut Vec<Row>) -> bool {
+    fn group(
+        &self,
+        group: Group,
+        label: String,
+        status: Option<&SyncStatus>,
+        rows: &mut Vec<Row>,
+    ) -> bool {
+        let failed = status.and_then(SyncStatus::error).is_some();
+        let refresh = matches!(group, Group::Account(_))
+            && !matches!(
+                status,
+                Some(
+                    SyncStatus::Running { .. }
+                        | SyncStatus::Finished(_, Some(Error::MicrosoftGraphRequired))
+                )
+            );
         let collapsed = self.collapsed.contains(&group);
         let icon = match group {
             Group::Local => Icon::LocalCalendars,
@@ -69,6 +85,7 @@ impl Sidebar {
             label,
             indent: 0,
             icon,
+            refresh,
         });
         !collapsed && !failed
     }
@@ -82,13 +99,14 @@ impl Sidebar {
         config: &Config,
     ) -> Vec<Row> {
         let mut rows = Vec::new();
-        if self.group(Group::Local, fl!("local-calendars"), false, &mut rows) {
+        if self.group(Group::Local, fl!("local-calendars"), None, &mut rows) {
             let mut local = storage.list_calendars();
             local.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
             rows.extend(local.into_iter().map(|calendar| Row {
                 item: Item::Calendar(CalendarKey::Local(calendar.id)),
                 label: calendar.name.clone(),
                 indent: 1,
+                refresh: false,
                 icon: Icon::Calendar {
                     color: calendar.color.clone(),
                     visible: calendar.visible,
@@ -111,11 +129,12 @@ impl Sidebar {
             .collect();
         accounts.sort();
         for (label, account_id) in accounts {
-            let failed = sync_status
-                .get(&account_id)
-                .and_then(SyncStatus::error)
-                .is_some();
-            if !self.group(Group::Account(account_id), label, failed, &mut rows) {
+            if !self.group(
+                Group::Account(account_id),
+                label,
+                sync_status.get(&account_id),
+                &mut rows,
+            ) {
                 continue;
             }
             let mut calendars: Vec<_> = storage.remote_calendars(account_id).iter().collect();
@@ -127,6 +146,7 @@ impl Sidebar {
                 }),
                 label: calendar.name.clone(),
                 indent: 1,
+                refresh: false,
                 icon: Icon::Calendar {
                     color: None,
                     visible: !config.remote_calendar_hidden(account_id, &calendar.id),
@@ -162,9 +182,9 @@ impl Sidebar {
                 .icon(icon.icon().size(16))
                 .data(row.item.clone())
                 .id();
-            if matches!(row.icon, Icon::AccountWarning) {
-                nav.enable(id, false);
-            }
+            // The nav widget's trailing action slot uses the "closable"
+            // flag. Calendar renders it as a refresh action for accounts.
+            nav.closable_set(id, row.refresh);
         }
         self.rows = rows;
     }
@@ -183,10 +203,16 @@ impl AppModel {
     }
 
     pub(super) fn update_sidebar(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Message>> {
-        if !self.nav.is_enabled(id) {
-            return Task::none();
-        }
         match self.nav.data::<Item>(id).cloned() {
+            Some(Item::Group(Group::Account(account_id)))
+                if self
+                    .account_sync_status(account_id)
+                    .and_then(SyncStatus::error)
+                    .is_some() =>
+            {
+                self.show_context_page(ContextPage::Settings);
+                Task::none()
+            }
             Some(Item::Group(group)) => {
                 if !self.sidebar.collapsed.remove(&group) {
                     self.sidebar.collapsed.insert(group);
@@ -235,6 +261,18 @@ impl AppModel {
         }
     }
 
+    pub(super) fn refresh_sidebar_account(
+        &mut self,
+        id: nav_bar::Id,
+    ) -> Task<cosmic::Action<Message>> {
+        match self.nav.data::<Item>(id) {
+            Some(Item::Group(Group::Account(account_id))) if self.nav.is_closable(id) => {
+                self.update(Message::Accounts(AccountsAction::Sync(*account_id)))
+            }
+            _ => Task::none(),
+        }
+    }
+
     pub(super) fn sidebar_context_menu(&self) -> Vec<menu::Tree<cosmic::Action<Message>>> {
         menu::nav_context(
             &HashMap::new(),
@@ -260,13 +298,6 @@ impl AppModel {
                             fl!("new-calendar"),
                             None,
                             MenuAction::NewCalendar,
-                        )]
-                    }
-                    Some(Item::Group(Group::Account(account_id))) if self.nav.is_enabled(id) => {
-                        vec![menu::Item::Button(
-                            fl!("accounts-sync-now"),
-                            None,
-                            MenuAction::SyncAccount(*account_id),
                         )]
                     }
                     _ => Vec::new(),
@@ -297,7 +328,6 @@ enum MenuAction {
     NewCalendar,
     RenameCalendar(CalendarId),
     DeleteCalendar(CalendarId),
-    SyncAccount(Uuid),
 }
 
 impl menu::action::MenuAction for MenuAction {
@@ -311,7 +341,6 @@ impl menu::action::MenuAction for MenuAction {
                 Message::CalendarManagement(Calendar::StartEditCalendar(id))
             }
             Self::DeleteCalendar(id) => Message::CalendarManagement(Calendar::DeleteCalendar(id)),
-            Self::SyncAccount(id) => Message::Accounts(AccountsAction::Sync(id)),
         })
     }
 }
@@ -398,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_accounts_are_disabled_until_a_retry_succeeds() {
+    fn failed_accounts_can_retry_without_showing_calendars() {
         use crate::features::accounts::Error;
         use std::time::Instant;
 
@@ -426,12 +455,18 @@ mod tests {
         let mut nav = nav_bar::Model::default();
         let active = BTreeSet::from([id]);
         let config = Config::default();
-        for status in [
-            SyncStatus::Finished(Instant::now(), Some(Error::Failed)),
-            SyncStatus::Running {
-                request_id: 1,
-                previous_error: Some(Error::Failed),
-            },
+        for (status, refresh) in [
+            (
+                SyncStatus::Finished(Instant::now(), Some(Error::Failed)),
+                true,
+            ),
+            (
+                SyncStatus::Running {
+                    request_id: 1,
+                    previous_error: Some(Error::Failed),
+                },
+                false,
+            ),
         ] {
             let rows = sidebar.build_rows(
                 &storage,
@@ -443,7 +478,9 @@ mod tests {
             assert_eq!(rows.len(), 2);
             assert!(matches!(rows[1].icon, Icon::AccountWarning));
             sidebar.update_nav(&mut nav, rows);
-            assert!(!nav.is_enabled(nav.iter().nth(1).unwrap()));
+            let account = nav.iter().nth(1).unwrap();
+            assert!(nav.is_enabled(account));
+            assert_eq!(nav.is_closable(account), refresh);
         }
 
         let status = HashMap::from([(id, SyncStatus::Finished(Instant::now(), None))]);

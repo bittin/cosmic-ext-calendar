@@ -162,6 +162,7 @@ pub struct AppModel {
 pub enum Message {
     MenuSurface(cosmic::surface::Action),
     Shortcut(shortcuts::Action),
+    RefreshSidebarAccount(nav_bar::Id),
     Quit,
     ToggleContextPage(ContextPage),
     LaunchUrl(String),
@@ -531,8 +532,29 @@ impl cosmic::Application for AppModel {
         self.sidebar_before_agenda.is_none().then_some(&self.nav)
     }
 
-    fn nav_context_menu(&self) -> Option<Vec<menu::Tree<cosmic::Action<Self::Message>>>> {
-        Some(self.sidebar_context_menu())
+    fn nav_bar(&self) -> Option<Element<'_, cosmic::Action<Message>>> {
+        if !self.core.nav_bar_active() {
+            return None;
+        }
+        let nav = widget::nav_bar(self.nav_model()?, |id| {
+            cosmic::Action::Cosmic(cosmic::app::Action::NavBar(id))
+        })
+        .on_context(|id| cosmic::Action::Cosmic(cosmic::app::Action::NavBarContext(id)))
+        .context_menu(Some(self.sidebar_context_menu()))
+        .close_icon(widget::icon::from_name("view-refresh-symbolic").size(16).icon())
+        .on_close(|id| cosmic::Action::App(Message::RefreshSidebarAccount(id)))
+        .window_id_maybe(self.core.main_window_id())
+        .on_surface_action(|action| cosmic::Action::App(Message::MenuSurface(action)))
+        .into_container()
+        .width(Length::Shrink)
+        .height(Length::Fill);
+
+        let nav = if self.core.is_condensed() {
+            nav
+        } else {
+            nav.max_width(280)
+        };
+        Some(nav.into())
     }
 
     /// Display a context drawer if the context page is requested.
@@ -708,6 +730,7 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::Shortcut(action) => return self.update_shortcut(action),
+            Message::RefreshSidebarAccount(id) => return self.refresh_sidebar_account(id),
             Message::Quit => return cosmic::iced::exit(),
             Message::Calendar(message) => return self.update_calendar(message),
             Message::Event(message) => return self.update_event(message),
@@ -1379,7 +1402,14 @@ impl AppModel {
         self.next_account_sync += 1;
         let request_id = self.next_account_sync;
         let previous_error = self.account_sync.get(&id).and_then(SyncStatus::error);
-        self.account_sync.insert(id, SyncStatus::Running { request_id, previous_error });
+        self.account_sync.insert(
+            id,
+            SyncStatus::Running {
+                request_id,
+                previous_error,
+            },
+        );
+        self.refresh_calendar_nav();
         let previous = self.storage.lock().unwrap().remote_sync_seed(id);
         Task::perform(async move { accounts_feature::dav::sync(&account, previous).await }, move |result| {
             cosmic::action::app(Message::Accounts(AccountsAction::Synced(id, request_id, result)))
