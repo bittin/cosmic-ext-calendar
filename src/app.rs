@@ -1826,7 +1826,19 @@ impl cosmic::Application for AppModel {
                 if !self.checking_alerts {
                     self.checking_alerts = true;
                     tasks.push(Task::perform(
-                        async { tokio::task::spawn_blocking(check_alerts).await },
+                        {
+                            let storage = self.storage.clone();
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    let remote_events: Vec<_> = storage.lock().unwrap()
+                                        .all_events().into_iter()
+                                        .filter(|event| matches!(event.calendar, CalendarKey::Remote { .. }))
+                                        .cloned()
+                                        .collect();
+                                    check_alerts(&remote_events)
+                                }).await
+                            }
+                        },
                         |result| {
                             match result {
                                 Ok(Ok(())) => {}

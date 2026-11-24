@@ -131,8 +131,6 @@ impl LocalStorage {
         Ok(storage)
     }
 
-    // -- Calendars --------------------------------------------------------
-
     pub fn has_calendars(&self) -> bool {
         !self.calendars.is_empty()
     }
@@ -197,8 +195,16 @@ impl LocalStorage {
 
     pub fn replace_remote_snapshot(&mut self, account_id: Uuid, snapshot: Snapshot) {
         self.clear_remote_snapshot(account_id);
+        let overrides: Vec<_> = snapshot
+            .events
+            .iter()
+            .filter_map(|event| Some((event.series_id?, event.recurrence_id?)))
+            .collect();
         for event in snapshot.events {
             self.index.upsert(event);
+        }
+        for (series, occurrence) in overrides {
+            self.suppress_occurrence(series, occurrence);
         }
         self.remote_calendars.insert(account_id, snapshot.calendars);
     }
@@ -220,8 +226,6 @@ impl LocalStorage {
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
-
-    // -- Events -------------------------------------------------------------
 
     pub fn get_event(&self, id: EventId) -> Option<&Event> {
         self.index
