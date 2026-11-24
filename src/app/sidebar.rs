@@ -94,7 +94,13 @@ impl Sidebar {
             .iter()
             .filter(|account| active_accounts.contains(&account.id))
         {
-            if !self.group(Group::Account(account.id), account.label(), 0, &mut rows) {
+            let label = account
+                .email
+                .as_deref()
+                .filter(|email| !email.is_empty())
+                .or(account.server.as_deref())
+                .unwrap_or(&account.display_name);
+            if !self.group(Group::Account(account.id), label.to_owned(), 0, &mut rows) {
                 continue;
             }
             let mut calendars: Vec<_> = storage.remote_calendars(account.id).iter().collect();
@@ -292,9 +298,9 @@ mod tests {
         let account = |provider: &str| Account {
             id: Uuid::new_v4(),
             display_name: provider.into(),
-            email: None,
+            email: (provider == "google").then(|| "person@example.test".into()),
             provider: provider.into(),
-            server: None,
+            server: (provider == "custom-caldav").then(|| "dav.example.test".into()),
         };
         let accounts = [
             account("google"),
@@ -339,6 +345,8 @@ mod tests {
         assert_eq!(remote, [(first, false), (second, true), (caldav, true)]);
         assert_eq!(rows.len(), 7);
         assert_eq!(rows[1].item, Item::Group(Group::Account(first)));
+        assert_eq!(rows[1].label, "person@example.test");
+        assert_eq!(rows[5].label, "dav.example.test");
         assert_eq!(rows[1].indent, 0);
         assert_eq!(rows[2].indent, 1);
         assert!(!rows
