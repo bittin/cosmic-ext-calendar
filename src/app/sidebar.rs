@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{AppModel, Message};
 use crate::config::Config;
-use crate::features::accounts::{Account, AccountsAction};
+use crate::features::accounts::{Account, AccountsAction, SyncStatus};
 use crate::features::calendar_management::{
     model::{calendar_color, CalendarKey},
     view::calendar_color_icon,
@@ -35,6 +35,7 @@ enum Item {
 enum Icon {
     LocalCalendars,
     Account,
+    AccountWarning,
     Calendar {
         color: Option<String>,
         visible: bool,
@@ -56,19 +57,20 @@ pub(super) struct Sidebar {
 }
 
 impl Sidebar {
-    fn group(&self, group: Group, label: String, indent: u16, rows: &mut Vec<Row>) -> bool {
+    fn group(&self, group: Group, label: String, failed: bool, rows: &mut Vec<Row>) -> bool {
         let collapsed = self.collapsed.contains(&group);
         let icon = match group {
             Group::Local => Icon::LocalCalendars,
+            Group::Account(_) if failed => Icon::AccountWarning,
             Group::Account(_) => Icon::Account,
         };
         rows.push(Row {
             item: Item::Group(group),
             label,
-            indent,
+            indent: 0,
             icon,
         });
-        !collapsed
+        !collapsed && !failed
     }
 
     fn build_rows(
@@ -76,10 +78,11 @@ impl Sidebar {
         storage: &LocalStorage,
         accounts: &[Account],
         active_accounts: &BTreeSet<Uuid>,
+        sync_status: &HashMap<Uuid, SyncStatus>,
         config: &Config,
     ) -> Vec<Row> {
         let mut rows = Vec::new();
-        if self.group(Group::Local, fl!("local-calendars"), 0, &mut rows) {
+        if self.group(Group::Local, fl!("local-calendars"), false, &mut rows) {
             let mut local = storage.list_calendars();
             local.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
             rows.extend(local.into_iter().map(|calendar| Row {
@@ -108,7 +111,11 @@ impl Sidebar {
             .collect();
         accounts.sort();
         for (label, account_id) in accounts {
-            if !self.group(Group::Account(account_id), label, 0, &mut rows) {
+            let failed = sync_status
+                .get(&account_id)
+                .and_then(SyncStatus::error)
+                .is_some();
+            if !self.group(Group::Account(account_id), label, failed, &mut rows) {
                 continue;
             }
             let mut calendars: Vec<_> = storage.remote_calendars(account_id).iter().collect();
@@ -128,6 +135,39 @@ impl Sidebar {
         }
         rows
     }
+
+    fn update_nav(&mut self, nav: &mut nav_bar::Model, rows: Vec<Row>) {
+        if self.rows == rows {
+            return;
+        }
+        let old_ids: Vec<_> = nav.iter().collect();
+        for id in old_ids {
+            nav.remove(id);
+        }
+        for row in &rows {
+            let icon = match &row.icon {
+                Icon::LocalCalendars => {
+                    widget::icon::from_name("x-office-calendar-symbolic").into()
+                }
+                Icon::Account => widget::icon::from_name("user-info-symbolic").into(),
+                Icon::AccountWarning => widget::icon::from_name("dialog-warning-symbolic").into(),
+                Icon::Calendar { color, visible } => {
+                    calendar_color_icon(color.as_deref().and_then(calendar_color), *visible)
+                }
+            };
+            let id = nav
+                .insert()
+                .indent(row.indent)
+                .text(row.label.clone())
+                .icon(icon.icon().size(16))
+                .data(row.item.clone())
+                .id();
+            if matches!(row.icon, Icon::AccountWarning) {
+                nav.enable(id, false);
+            }
+        }
+        self.rows = rows;
+    }
 }
 
 impl AppModel {
@@ -136,36 +176,16 @@ impl AppModel {
             &self.storage.lock().unwrap(),
             &self.accounts,
             &self.active_accounts,
+            &self.account_sync,
             &self.config,
         );
-        if self.sidebar.rows == rows {
-            return;
-        }
-        let old_ids: Vec<_> = self.nav.iter().collect();
-        for id in old_ids {
-            self.nav.remove(id);
-        }
-        for row in &rows {
-            let icon = match &row.icon {
-                Icon::LocalCalendars => {
-                    widget::icon::from_name("x-office-calendar-symbolic").into()
-                }
-                Icon::Account => widget::icon::from_name("user-info-symbolic").into(),
-                Icon::Calendar { color, visible } => {
-                    calendar_color_icon(color.as_deref().and_then(calendar_color), *visible)
-                }
-            };
-            self.nav
-                .insert()
-                .indent(row.indent)
-                .text(row.label.clone())
-                .icon(icon.icon().size(16))
-                .data(row.item.clone());
-        }
-        self.sidebar.rows = rows;
+        self.sidebar.update_nav(&mut self.nav, rows);
     }
 
     pub(super) fn update_sidebar(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Message>> {
+        if !self.nav.is_enabled(id) {
+            return Task::none();
+        }
         match self.nav.data::<Item>(id).cloned() {
             Some(Item::Group(group)) => {
                 if !self.sidebar.collapsed.remove(&group) {
@@ -242,11 +262,13 @@ impl AppModel {
                             MenuAction::NewCalendar,
                         )]
                     }
-                    Some(Item::Group(Group::Account(id))) => vec![menu::Item::Button(
-                        fl!("accounts-sync-now"),
-                        None,
-                        MenuAction::SyncAccount(*id),
-                    )],
+                    Some(Item::Group(Group::Account(account_id))) if self.nav.is_enabled(id) => {
+                        vec![menu::Item::Button(
+                            fl!("accounts-sync-now"),
+                            None,
+                            MenuAction::SyncAccount(*account_id),
+                        )]
+                    }
                     _ => Vec::new(),
                 })
                 .collect(),
@@ -337,7 +359,7 @@ mod tests {
             .insert(first, BTreeSet::from([collection.into()]));
         let active = BTreeSet::from([first, second, caldav]);
         let mut sidebar = Sidebar::default();
-        let rows = sidebar.build_rows(&storage, &accounts, &active, &config);
+        let rows = sidebar.build_rows(&storage, &accounts, &active, &HashMap::new(), &config);
         let remote: Vec<_> = rows
             .iter()
             .filter_map(|row| match (&row.item, &row.icon) {
@@ -364,7 +386,7 @@ mod tests {
             .any(|row| row.item == Item::Group(Group::Account(inactive))));
 
         sidebar.collapsed.insert(Group::Account(first));
-        let rows = sidebar.build_rows(&storage, &accounts, &active, &config);
+        let rows = sidebar.build_rows(&storage, &accounts, &active, &HashMap::new(), &config);
         assert!(!rows.iter().any(|row| matches!(
             row.item,
             Item::Calendar(CalendarKey::Remote { account_id, .. }) if account_id == first
@@ -373,5 +395,62 @@ mod tests {
             row.item,
             Item::Calendar(CalendarKey::Remote { account_id, .. }) if account_id == second
         )));
+    }
+
+    #[test]
+    fn failed_accounts_are_disabled_until_a_retry_succeeds() {
+        use crate::features::accounts::Error;
+        use std::time::Instant;
+
+        let id = Uuid::new_v4();
+        let accounts = [Account {
+            id,
+            display_name: "Test".into(),
+            email: Some("test@example.test".into()),
+            provider: "google".into(),
+            server: None,
+        }];
+        let mut storage = LocalStorage::unavailable("test".into());
+        storage.replace_remote_snapshot(
+            id,
+            Snapshot {
+                calendars: vec![Calendar {
+                    id: "collection".into(),
+                    name: "Personal".into(),
+                    sync_token: None,
+                }],
+                events: Vec::new(),
+            },
+        );
+        let mut sidebar = Sidebar::default();
+        let mut nav = nav_bar::Model::default();
+        let active = BTreeSet::from([id]);
+        let config = Config::default();
+        for status in [
+            SyncStatus::Finished(Instant::now(), Some(Error::Failed)),
+            SyncStatus::Running {
+                request_id: 1,
+                previous_error: Some(Error::Failed),
+            },
+        ] {
+            let rows = sidebar.build_rows(
+                &storage,
+                &accounts,
+                &active,
+                &HashMap::from([(id, status)]),
+                &config,
+            );
+            assert_eq!(rows.len(), 2);
+            assert!(matches!(rows[1].icon, Icon::AccountWarning));
+            sidebar.update_nav(&mut nav, rows);
+            assert!(!nav.is_enabled(nav.iter().nth(1).unwrap()));
+        }
+
+        let status = HashMap::from([(id, SyncStatus::Finished(Instant::now(), None))]);
+        let rows = sidebar.build_rows(&storage, &accounts, &active, &status, &config);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[1].icon, Icon::Account));
+        sidebar.update_nav(&mut nav, rows);
+        assert!(nav.is_enabled(nav.iter().nth(1).unwrap()));
     }
 }

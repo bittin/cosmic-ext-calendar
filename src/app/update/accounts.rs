@@ -59,7 +59,7 @@ impl AppModel {
             }
             AccountsAction::Sync(id) => return self.sync_account(id),
             AccountsAction::Synced(id, request_id, result) => {
-                if !matches!(self.account_sync.get(&id), Some(accounts_feature::SyncStatus::Running(current)) if *current == request_id)
+                if !matches!(self.account_sync.get(&id), Some(accounts_feature::SyncStatus::Running { request_id: current, .. }) if *current == request_id)
                 {
                     return Task::none();
                 }

@@ -5,7 +5,7 @@ pub mod subscription;
 pub mod view;
 
 use crate::fl;
-use accounts::{AccountsClient, AccountsError, CalendarClient};
+use accounts::{models::Service, AccountsClient, AccountsError};
 use uuid::Uuid;
 
 /// Calendar's local view of an Accounts account.
@@ -127,38 +127,39 @@ pub struct Discovery {
     pub watched_ids: Vec<Uuid>,
 }
 
-/// Lists broker accounts that can supply calendar data.
-///
-/// The shared helper skips broken account objects and accounts without a
-/// usable CalDAV endpoint. The typed endpoint client then rejects accounts
-/// advertising an authentication scheme Calendar cannot use.
+/// Keep enabled Calendar accounts discoverable even if their endpoint cannot
+/// be opened. Sync validates the endpoint and reports its error per account.
 pub async fn discover() -> Result<Discovery, Error> {
     let client = AccountsClient::connect().await.map_err(Error::from)?;
-    // A broken account object can make the strict list fail. Keep usable
-    // accounts discoverable in that case and rely on the periodic recheck
-    // for any service signals we could not subscribe to.
-    let mut watched_ids: Vec<_> = client
-        .list_accounts()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|account| account.id)
-        .collect();
-    let mut accounts = Vec::new();
-
-    for (account, _) in client.list_calendar_accounts().await.map_err(Error::from)? {
-        let Ok(endpoint) = CalendarClient::connect(&account).await else {
-            continue;
-        };
-        if endpoint.auth_method_kind().await.is_err() {
-            continue;
+    let (eligible, mut watched_ids) = match client.list_accounts().await {
+        Ok(accounts) => {
+            let watched = accounts.iter().map(|account| account.id).collect();
+            let eligible = accounts
+                .into_iter()
+                .filter(|account| account.is_enabled_for(&Service::Calendar))
+                .collect::<Vec<_>>();
+            (eligible, watched)
         }
-        watched_ids.push(account.id);
-        accounts.push(Account::from_broker(&account));
-    }
-
+        Err(_) => {
+            // The tolerant helper still returns usable accounts when one
+            // account object could not be read by the strict listing.
+            let eligible: Vec<_> = client
+                .list_calendar_accounts()
+                .await
+                .map_err(Error::from)?
+                .into_iter()
+                .map(|(account, _)| account)
+                .collect();
+            let watched = eligible
+                .iter()
+                .map(|account| account.id)
+                .collect::<Vec<_>>();
+            (eligible, watched)
+        }
+    };
     watched_ids.sort_unstable();
     watched_ids.dedup();
+    let mut accounts: Vec<_> = eligible.iter().map(Account::from_broker).collect();
     accounts.sort_by_key(Account::label);
     Ok(Discovery {
         accounts,
@@ -167,8 +168,20 @@ pub async fn discover() -> Result<Discovery, Error> {
 }
 
 pub enum SyncStatus {
-    Running(u64),
+    Running {
+        request_id: u64,
+        previous_error: Option<Error>,
+    },
     Finished(std::time::Instant, Option<Error>),
+}
+
+impl SyncStatus {
+    pub fn error(&self) -> Option<Error> {
+        match self {
+            Self::Running { previous_error, .. } => *previous_error,
+            Self::Finished(_, error) => *error,
+        }
+    }
 }
 
 pub async fn open_add_account() -> Result<(), String> {

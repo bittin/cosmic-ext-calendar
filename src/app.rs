@@ -1369,7 +1369,7 @@ impl AppModel {
     fn sync_account(&mut self, id: uuid::Uuid) -> Task<cosmic::Action<Message>> {
         use accounts_feature::SyncStatus;
         if !self.active_accounts.contains(&id)
-            || matches!(self.account_sync.get(&id), Some(SyncStatus::Running(_)))
+            || matches!(self.account_sync.get(&id), Some(SyncStatus::Running { .. }))
         {
             return Task::none();
         }
@@ -1378,7 +1378,8 @@ impl AppModel {
         };
         self.next_account_sync += 1;
         let request_id = self.next_account_sync;
-        self.account_sync.insert(id, SyncStatus::Running(request_id));
+        let previous_error = self.account_sync.get(&id).and_then(SyncStatus::error);
+        self.account_sync.insert(id, SyncStatus::Running { request_id, previous_error });
         let previous = self.storage.lock().unwrap().remote_sync_seed(id);
         Task::perform(async move { accounts_feature::dav::sync(&account, previous).await }, move |result| {
             cosmic::action::app(Message::Accounts(AccountsAction::Synced(id, request_id, result)))

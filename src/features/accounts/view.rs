@@ -49,7 +49,7 @@ pub fn settings_view(app: &AppModel) -> Element<'_, Message> {
         let mut row = widget::settings::item::builder(account.label());
         if enabled {
             match status {
-                Some(SyncStatus::Running(_)) => row = row.description(fl!("accounts-syncing")),
+                Some(SyncStatus::Running { .. }) => row = row.description(fl!("accounts-syncing")),
                 Some(SyncStatus::Finished(_, Some(error))) => row = row.description(error.text()),
                 Some(SyncStatus::Finished(_, None)) => {
                     let names = app.remote_calendar_names(id);
@@ -72,7 +72,7 @@ pub fn settings_view(app: &AppModel) -> Element<'_, Message> {
             && !matches!(
                 status,
                 Some(
-                    SyncStatus::Running(_)
+                    SyncStatus::Running { .. }
                         | SyncStatus::Finished(_, Some(Error::MicrosoftGraphRequired))
                 )
             )
