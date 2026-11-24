@@ -625,7 +625,6 @@ mod tests {
     fn google_uses_the_primary_calendar_principal() {
         let account = Account {
             id: Uuid::nil(),
-            display_name: "Google".into(),
             email: Some("person+calendar@example.org".into()),
             provider: "google".into(),
             server: None,
@@ -658,7 +657,6 @@ mod tests {
         };
         let account = Account {
             id: Uuid::new_v4(),
-            display_name: "CalDAV".into(),
             email: None,
             provider: "caldav".into(),
             server: None,

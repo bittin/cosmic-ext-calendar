@@ -119,10 +119,7 @@ impl Sidebar {
             .filter(|account| active_accounts.contains(&account.id))
             .map(|account| {
                 let label = account
-                    .email
-                    .as_deref()
-                    .filter(|email| !email.is_empty())
-                    .or(account.server.as_deref())
+                    .address()
                     .map_or_else(|| fl!("sidebar-online-account"), str::to_owned);
                 (label, account.id)
             })
@@ -354,7 +351,6 @@ mod tests {
     fn lists_accounts_directly_and_keeps_visibility_per_account() {
         let account = |provider: &str| Account {
             id: Uuid::new_v4(),
-            display_name: provider.into(),
             email: (provider == "google").then(|| "person@example.test".into()),
             provider: provider.into(),
             server: (provider == "custom-caldav").then(|| "dav.example.test".into()),
@@ -434,7 +430,6 @@ mod tests {
         let id = Uuid::new_v4();
         let accounts = [Account {
             id,
-            display_name: "Test".into(),
             email: Some("test@example.test".into()),
             provider: "google".into(),
             server: None,

@@ -15,24 +15,25 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Account {
     pub id: Uuid,
-    pub display_name: String,
     pub email: Option<String>,
     pub provider: String,
     pub server: Option<String>,
 }
 
 impl Account {
-    pub fn label(&self) -> String {
-        match self
-            .email
+    pub fn address(&self) -> Option<&str> {
+        self.email
             .as_deref()
             .filter(|email| !email.is_empty())
             .or(self.server.as_deref())
-        {
-            Some(identity) if identity != self.display_name => {
-                format!("{} ({identity})", self.display_name)
-            }
-            _ => self.display_name.clone(),
+    }
+
+    pub fn provider_label(&self) -> &str {
+        match self.provider.as_str() {
+            "google" => "Google",
+            "microsoft" => "Microsoft",
+            accounts::models::CUSTOM_CALDAV_PROVIDER => "CalDAV",
+            provider => provider,
         }
     }
 
@@ -49,7 +50,6 @@ impl Account {
             });
         Self {
             id: account.id,
-            display_name: account.display_name.clone(),
             email: account.email.clone(),
             provider: account.provider.clone(),
             server,
@@ -160,7 +160,7 @@ pub async fn discover() -> Result<Discovery, Error> {
     watched_ids.sort_unstable();
     watched_ids.dedup();
     let mut accounts: Vec<_> = eligible.iter().map(Account::from_broker).collect();
-    accounts.sort_by_key(Account::label);
+    accounts.sort_by(|a, b| (a.address(), a.id).cmp(&(b.address(), b.id)));
     Ok(Discovery {
         accounts,
         watched_ids,

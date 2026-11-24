@@ -1369,10 +1369,8 @@ impl AppModel {
         self.account_sync.get(&id)
     }
 
-    pub(crate) fn remote_calendar_names(&self, id: uuid::Uuid) -> Vec<String> {
-        self.storage.lock().unwrap().remote_calendars(id).iter()
-            .map(|calendar| calendar.name.clone())
-            .collect()
+    pub(crate) fn account_has_calendars(&self, id: uuid::Uuid) -> bool {
+        !self.storage.lock().unwrap().remote_calendars(id).is_empty()
     }
 
     fn sync_active_accounts(&mut self) -> Task<cosmic::Action<Message>> {
