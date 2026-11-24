@@ -2,7 +2,7 @@
     <img src="resources/icons/hicolor/scalable/apps/icon.svg" width="250"/>
     <h1>Calendar</h1>
     <h3>Never miss a thing!</h3>
-    <p>A calendar application for the COSMIC desktop</p>
+    <p>A calendar application for the COSMIC™ desktop</p>
 </div>
 
 ![color-schemes-light.png](https://github.com/user-attachments/assets/df4f9b5f-e1d8-47b8-b2ae-82b1c0073068#gh-light-mode-only)
