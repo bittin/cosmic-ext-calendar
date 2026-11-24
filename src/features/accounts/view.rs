@@ -7,7 +7,7 @@ use crate::{
     fl,
 };
 
-use super::{AccountsAction, SyncStatus};
+use super::{AccountsAction, Error, SyncStatus};
 
 /// Accounts section rendered inside Calendar's Settings drawer.
 ///
@@ -68,7 +68,15 @@ pub fn settings_view(app: &AppModel) -> Element<'_, Message> {
         let mut controls = widget::row::with_children(vec![toggle.into()])
             .spacing(cosmic::theme::spacing().space_xs)
             .align_y(cosmic::iced::Alignment::Center);
-        if enabled && !matches!(status, Some(SyncStatus::Running(_))) {
+        if enabled
+            && !matches!(
+                status,
+                Some(
+                    SyncStatus::Running(_)
+                        | SyncStatus::Finished(_, Some(Error::MicrosoftGraphRequired))
+                )
+            )
+        {
             controls = controls.push(
                 widget::button::standard(fl!("accounts-sync-now"))
                     .on_press(Message::Accounts(AccountsAction::Sync(id))),

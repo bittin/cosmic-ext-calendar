@@ -107,15 +107,16 @@ pub struct Discovery {
 /// advertising an authentication scheme Calendar cannot use.
 pub async fn discover() -> Result<Discovery, Error> {
     let client = AccountsClient::connect().await.map_err(Error::from)?;
+    // A broken account object can make the strict list fail. Keep usable
+    // accounts discoverable in that case and rely on the periodic recheck
+    // for any service signals we could not subscribe to.
     let mut watched_ids: Vec<_> = client
         .list_accounts()
         .await
-        .map_err(AccountsError::from)
-        .map_err(Error::from)?
+        .unwrap_or_default()
         .into_iter()
         .map(|account| account.id)
         .collect();
-    watched_ids.sort_unstable();
     let mut accounts = Vec::new();
 
     for (account, _) in client.list_calendar_accounts().await.map_err(Error::from)? {
@@ -125,10 +126,13 @@ pub async fn discover() -> Result<Discovery, Error> {
         if endpoint.auth_method_kind().await.is_err() {
             continue;
         }
+        watched_ids.push(account.id);
         accounts.push(Account::from_broker(&account));
     }
 
-    accounts.sort_by_key(|account| account.label());
+    watched_ids.sort_unstable();
+    watched_ids.dedup();
+    accounts.sort_by_key(Account::label);
     Ok(Discovery {
         accounts,
         watched_ids,
