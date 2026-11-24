@@ -1950,8 +1950,13 @@ impl cosmic::Application for AppModel {
                     return cosmic::task::message(Message::Accounts(AccountsAction::Discover));
                 }
                 AccountsAction::OpenAccountsApp => {
-                    if let Err(err) = accounts::ui::open_add_account() {
-                        tasks.push(self.toast(fl!("accounts-app-launch-error", error = err.to_string())));
+                    return Task::perform(accounts_feature::open_add_account(), |result| {
+                        cosmic::action::app(Message::Accounts(AccountsAction::AccountsAppOpened(result)))
+                    });
+                }
+                AccountsAction::AccountsAppOpened(result) => {
+                    if let Err(error) = result {
+                        tasks.push(self.toast(fl!("accounts-app-launch-error", error = error)));
                     }
                 }
                 AccountsAction::Sync(id) => return self.sync_account(id),

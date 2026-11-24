@@ -86,6 +86,7 @@ pub enum AccountsAction {
     Discovered(Result<Discovery, Error>),
     Changed,
     OpenAccountsApp,
+    AccountsAppOpened(Result<(), String>),
     SetLocallyEnabled(Uuid, bool),
     Sync(Uuid),
     Synced(Uuid, u64, Result<dav::Snapshot, Error>),
@@ -135,4 +136,20 @@ pub async fn discover() -> Result<Discovery, Error> {
 pub enum SyncStatus {
     Running(u64),
     Finished(std::time::Instant, Option<Error>),
+}
+
+pub async fn open_add_account() -> Result<(), String> {
+    if std::path::Path::new("/.flatpak-info").is_file() {
+        use cosmic::dialog::ashpd::desktop::open_uri::OpenFileRequest;
+
+        let uri = reqwest::Url::parse("cosmic-accounts://add-account")
+            .expect("valid Accounts activation URI");
+        OpenFileRequest::default()
+            .send_uri(&uri)
+            .await
+            .and_then(|request| request.response())
+            .map_err(|error| error.to_string())
+    } else {
+        accounts::ui::open_add_account().map_err(|error| error.to_string())
+    }
 }
