@@ -90,31 +90,36 @@ impl Sidebar {
             }));
         }
 
-        for account in accounts
+        let mut accounts: Vec<_> = accounts
             .iter()
             .filter(|account| active_accounts.contains(&account.id))
-        {
-            let label = account
-                .email
-                .as_deref()
-                .filter(|email| !email.is_empty())
-                .or(account.server.as_deref())
-                .unwrap_or(&account.display_name);
-            if !self.group(Group::Account(account.id), label.to_owned(), 0, &mut rows) {
+            .map(|account| {
+                let label = account
+                    .email
+                    .as_deref()
+                    .filter(|email| !email.is_empty())
+                    .or(account.server.as_deref())
+                    .map_or_else(|| fl!("sidebar-online-account"), str::to_owned);
+                (label, account.id)
+            })
+            .collect();
+        accounts.sort();
+        for (label, account_id) in accounts {
+            if !self.group(Group::Account(account_id), label, 0, &mut rows) {
                 continue;
             }
-            let mut calendars: Vec<_> = storage.remote_calendars(account.id).iter().collect();
+            let mut calendars: Vec<_> = storage.remote_calendars(account_id).iter().collect();
             calendars.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
             rows.extend(calendars.into_iter().map(|calendar| Row {
                 item: Item::Calendar(CalendarKey::Remote {
-                    account_id: account.id,
+                    account_id,
                     calendar_id: calendar.id.clone(),
                 }),
                 label: calendar.name.clone(),
                 indent: 1,
                 icon: Icon::Calendar {
                     color: None,
-                    visible: !config.remote_calendar_hidden(account.id, &calendar.id),
+                    visible: !config.remote_calendar_hidden(account_id, &calendar.id),
                 },
             }));
         }
@@ -342,11 +347,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(remote, [(first, false), (second, true), (caldav, true)]);
+        let mut google = [(first, false), (second, true)];
+        google.sort_by_key(|(id, _)| *id);
+        assert_eq!(remote, [(caldav, true), google[0], google[1]]);
         assert_eq!(rows.len(), 7);
-        assert_eq!(rows[1].item, Item::Group(Group::Account(first)));
-        assert_eq!(rows[1].label, "person@example.test");
-        assert_eq!(rows[5].label, "dav.example.test");
+        assert_eq!(rows[1].item, Item::Group(Group::Account(caldav)));
+        assert_eq!(rows[1].label, "dav.example.test");
+        assert_eq!(rows[3].label, "person@example.test");
         assert_eq!(rows[1].indent, 0);
         assert_eq!(rows[2].indent, 1);
         assert!(!rows

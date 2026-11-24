@@ -220,3 +220,4 @@ shortcut-previous-event = Poprzednie wydarzenie wybranego dnia
 shortcut-next-event = Następne wydarzenie wybranego dnia
 
 local-calendars = Kalendarze lokalne
+sidebar-online-account = Konto online

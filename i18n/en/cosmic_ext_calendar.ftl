@@ -257,3 +257,4 @@ shortcut-previous-event = Previous event on the selected day
 shortcut-next-event = Next event on the selected day
 
 local-calendars = Local calendars
+sidebar-online-account = Online account
