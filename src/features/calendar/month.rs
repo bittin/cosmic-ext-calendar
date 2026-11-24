@@ -1,3 +1,4 @@
+use super::CalendarMessage;
 use std::collections::BTreeSet;
 
 use cosmic::{
@@ -56,7 +57,7 @@ impl Occurrence {
     }
 
     pub(super) fn open(&self, anchor: CalendarAnchor) -> Message {
-        Message::CalendarEventClicked(self.key(), anchor)
+        Message::Calendar(CalendarMessage::CalendarEventClicked(self.key(), anchor))
     }
 }
 
@@ -417,7 +418,7 @@ fn week_view<'a>(
                 .height(EVENT_HEIGHT)
                 .padding([0, 4])
                 .class(cosmic::style::Button::Text)
-                .on_press(Message::ShowDayAgenda(date))
+                .on_press(Message::Calendar(CalendarMessage::ShowDayAgenda(date)))
                 .into()
         } else {
             widget::space::horizontal().width(Length::Fill).into()

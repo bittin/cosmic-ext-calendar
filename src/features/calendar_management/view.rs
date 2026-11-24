@@ -1,3 +1,4 @@
+use super::CalendarManagementMessage;
 use cosmic::{
     iced::{Border, Length},
     theme::{spacing, Container},
@@ -21,7 +22,9 @@ const PRESETS: [&str; 6] = [
 pub fn view(form: &CalendarForm) -> Element<'_, Message> {
     let mut swatches = Vec::with_capacity(PRESETS.len() + 2);
     let default_swatch = color_button(
-        (!form.writing).then_some(Message::SetCalendarColor(None)),
+        (!form.writing).then_some(Message::CalendarManagement(
+            CalendarManagementMessage::SetCalendarColor(None),
+        )),
         Some(cosmic::theme::active().cosmic().accent_text_color().into()),
         Length::Fixed(12.0),
     )
@@ -38,7 +41,11 @@ pub fn view(form: &CalendarForm) -> Element<'_, Message> {
     for hex in PRESETS {
         let color = calendar_color(hex);
         let swatch = color_button(
-            (!form.writing).then(|| Message::SetCalendarColor(Some(hex.into()))),
+            (!form.writing).then(|| {
+                Message::CalendarManagement(CalendarManagementMessage::SetCalendarColor(Some(
+                    hex.into(),
+                )))
+            }),
             color,
             Length::Fixed(12.0),
         )
@@ -51,8 +58,8 @@ pub fn view(form: &CalendarForm) -> Element<'_, Message> {
             .any(|hex| calendar_color(hex) == Some(*color))
     });
     let custom_button = color_button(
-        (!form.writing).then_some(Message::CalendarColorPicker(
-            ColorPickerUpdate::ToggleColorPicker,
+        (!form.writing).then_some(Message::CalendarManagement(
+            CalendarManagementMessage::CalendarColorPicker(ColorPickerUpdate::ToggleColorPicker),
         )),
         custom,
         Length::Fixed(12.0),
@@ -65,7 +72,11 @@ pub fn view(form: &CalendarForm) -> Element<'_, Message> {
         .push(widget::text::body(fl!("calendar-name")))
         .push(
             widget::text_input("", &form.name)
-                .on_input(Message::CalendarNameChanged)
+                .on_input(|value| {
+                    Message::CalendarManagement(CalendarManagementMessage::CalendarNameChanged(
+                        value,
+                    ))
+                })
                 .width(Length::Fill),
         )
         .push(widget::text::body(fl!("calendar-color")))
@@ -77,7 +88,9 @@ pub fn view(form: &CalendarForm) -> Element<'_, Message> {
 
     let picker = form
         .picker
-        .builder(Message::CalendarColorPicker)
+        .builder(|value| {
+            Message::CalendarManagement(CalendarManagementMessage::CalendarColorPicker(value))
+        })
         .build(
             fl!("calendar-color-recent"),
             fl!("calendar-color-copy"),

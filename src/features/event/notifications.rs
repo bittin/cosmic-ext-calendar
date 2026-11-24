@@ -14,7 +14,13 @@ use crate::features::calendar_management::model::CalendarKey;
 use crate::features::event::model::{Event, EventTime};
 use crate::fl;
 use crate::shared::ids::EventId;
-use crate::shared::storage::{LocalStorage, data_dir, write_json_atomic};
+use crate::shared::storage::{data_dir, write_json_atomic, LocalStorage};
+
+#[derive(Debug, Clone)]
+pub enum NotificationMessage {
+    CheckAlerts,
+    AlertsChecked,
+}
 
 pub const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const GRACE: Duration = Duration::minutes(5);

@@ -1,5 +1,8 @@
+mod message;
+pub use message::{CalendarAction, CalendarMessage};
+
+use crate::app::{AppModel, Message};
 use crate::Result;
-use crate::app::{AppModel, CalendarAction, Message};
 use crate::shared::storage::LocalStorage;
 use chrono::Offset;
 use cosmic::style::Button;
@@ -78,7 +81,7 @@ impl menu::Action for EventMenuAction {
     type Message = Message;
 
     fn message(&self) -> Message {
-        Message::CalendarAction(self.0, self.1, self.2)
+        Message::Calendar(CalendarMessage::EventAction(self.0, self.1, self.2))
     }
 }
 
@@ -207,7 +210,9 @@ fn slot_target<'a>(
 ) -> Element<'a, Message> {
     paste_target(
         app,
-        mouse_area(content).on_release(Message::CalendarEmptySlotClicked(slot)),
+        mouse_area(content).on_release(Message::Calendar(
+            CalendarMessage::CalendarEmptySlotClicked(slot),
+        )),
         slot.start(offset),
     )
 }
@@ -273,7 +278,9 @@ fn all_day_cell<'a>(
         .width(Length::Fill)
         .class(slot_style(selected == Some(slot)));
     mouse_area(cell)
-        .on_release(Message::CalendarEmptySlotClicked(slot))
+        .on_release(Message::Calendar(
+            CalendarMessage::CalendarEmptySlotClicked(slot),
+        ))
         .into()
 }
 

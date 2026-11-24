@@ -1,3 +1,4 @@
+use super::CalendarMessage;
 use cosmic::{
     Element,
     iced::{Length, alignment::Horizontal},
@@ -30,6 +31,8 @@ pub fn day_header<'a>(
     widget::button::custom(header)
         .width(Length::Fill)
         .class(cosmic::style::Button::Text)
-        .on_press(crate::app::Message::SelectDate(date))
+        .on_press(crate::app::Message::Calendar(CalendarMessage::SelectDate(
+            date,
+        )))
         .height(60)
 }
