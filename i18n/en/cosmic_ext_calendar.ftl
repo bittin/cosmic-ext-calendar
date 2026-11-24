@@ -213,3 +213,6 @@ accounts-error-access-denied = Access to this account was denied.
 accounts-error-consent-timeout = The Accounts request timed out.
 accounts-error-failed = Accounts could not complete the request.
 accounts-error-unsupported = This account is not supported.
+accounts-syncing = Syncing calendars…
+accounts-no-calendars = No calendars found.
+accounts-sync-now = Sync now

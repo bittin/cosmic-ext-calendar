@@ -7,7 +7,7 @@ use crate::{
     fl,
 };
 
-use super::AccountsAction;
+use super::{AccountsAction, SyncStatus};
 
 /// Accounts section rendered inside Calendar's Settings drawer.
 ///
@@ -44,11 +44,37 @@ pub fn settings_view(app: &AppModel) -> Element<'_, Message> {
 
     for account in accounts {
         let id = account.id;
-        section = section.add(widget::settings::item::builder(account.label()).control(
-            widget::toggler(app.account_locally_enabled(id)).on_toggle(move |enabled| {
-                Message::Accounts(AccountsAction::SetLocallyEnabled(id, enabled))
-            }),
-        ));
+        let enabled = app.account_locally_enabled(id);
+        let status = app.account_sync_status(id);
+        let mut row = widget::settings::item::builder(account.label());
+        if enabled {
+            match status {
+                Some(SyncStatus::Running(_)) => row = row.description(fl!("accounts-syncing")),
+                Some(SyncStatus::Finished(_, Some(error))) => row = row.description(error.text()),
+                Some(SyncStatus::Finished(_, None)) => {
+                    let names = app.remote_calendar_names(id);
+                    row = row.description(if names.is_empty() {
+                        fl!("accounts-no-calendars")
+                    } else {
+                        names.join(", ")
+                    });
+                }
+                None => {}
+            }
+        }
+        let toggle = widget::toggler(enabled).on_toggle(move |enabled| {
+            Message::Accounts(AccountsAction::SetLocallyEnabled(id, enabled))
+        });
+        let mut controls = widget::row::with_children(vec![toggle.into()])
+            .spacing(cosmic::theme::spacing().space_xs)
+            .align_y(cosmic::iced::Alignment::Center);
+        if enabled && !matches!(status, Some(SyncStatus::Running(_))) {
+            controls = controls.push(
+                widget::button::standard(fl!("accounts-sync-now"))
+                    .on_press(Message::Accounts(AccountsAction::Sync(id))),
+            );
+        }
+        section = section.add(row.control(controls));
     }
 
     section.into()

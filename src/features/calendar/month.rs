@@ -32,6 +32,7 @@ const WEEKDAY_ROW_HEIGHT: f32 = 28.0;
 pub(super) struct Occurrence {
     id: EventId,
     pub(super) selected: bool,
+    pub(super) editable: bool,
     pub(super) display_start: OffsetDateTime,
     pub(super) display_end: OffsetDateTime,
     pub(super) display_end_exclusive: OffsetDateTime,
@@ -85,6 +86,11 @@ pub(super) fn occurrences(
     );
     for item in &mut items {
         item.selected = Some(item.key()) == selection;
+        if let Some(Event { calendar: CalendarKey::Remote { account_id, calendar_id }, .. }) = storage.get_event(item.id) {
+            item.calendar = storage.remote_calendars(*account_id).iter()
+                .find(|calendar| calendar.id == *calendar_id)
+                .map(|calendar| calendar.name.clone());
+        }
     }
     items
 }
@@ -138,6 +144,7 @@ fn occurrences_with_calendars<'a>(
             items.push(Occurrence {
                 id: event.id,
                 selected: false,
+                editable: matches!(event.calendar, CalendarKey::Local(_)),
                 start,
                 display_start,
                 display_end,

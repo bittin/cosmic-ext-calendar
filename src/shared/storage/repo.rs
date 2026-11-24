@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use tracing::warn;
+use uuid::Uuid;
 
 use super::{atomic, index::EventIndex, migration, paths};
+use crate::features::accounts::dav::{Calendar, Snapshot};
 use crate::features::calendar_management::model::{
     CalendarKey, LocalCalendarMeta, CURRENT_CALENDAR_SCHEMA_VERSION,
 };
@@ -22,6 +24,7 @@ pub struct LocalStorage {
     event_files: HashMap<EventId, PathBuf>,
     duplicate_files: HashMap<EventId, Vec<PathBuf>>,
     calendars: HashMap<CalendarId, LocalCalendarMeta>,
+    remote_calendars: HashMap<Uuid, Vec<Calendar>>,
 }
 
 impl LocalStorage {
@@ -33,6 +36,7 @@ impl LocalStorage {
             event_files: HashMap::new(),
             duplicate_files: HashMap::new(),
             calendars: HashMap::new(),
+            remote_calendars: HashMap::new(),
         }
     }
 
@@ -106,6 +110,7 @@ impl LocalStorage {
             event_files,
             duplicate_files,
             calendars,
+            remote_calendars: HashMap::new(),
         };
         let splits: Vec<_> = storage
             .index
@@ -190,6 +195,32 @@ impl LocalStorage {
         }
     }
 
+    pub fn replace_remote_snapshot(&mut self, account_id: Uuid, snapshot: Snapshot) {
+        self.clear_remote_snapshot(account_id);
+        for event in snapshot.events {
+            self.index.upsert(event);
+        }
+        self.remote_calendars.insert(account_id, snapshot.calendars);
+    }
+
+    pub fn clear_remote_snapshot(&mut self, account_id: Uuid) {
+        self.remote_calendars.remove(&account_id);
+        let ids: Vec<_> = self.index.all_records().filter_map(|event| {
+            matches!(event.calendar, CalendarKey::Remote { account_id: id, .. } if id == account_id)
+                .then_some(event.id)
+        }).collect();
+        for id in ids {
+            self.index.remove(id);
+        }
+    }
+
+    pub fn remote_calendars(&self, account_id: Uuid) -> &[Calendar] {
+        self.remote_calendars
+            .get(&account_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
     // -- Events -------------------------------------------------------------
 
     pub fn get_event(&self, id: EventId) -> Option<&Event> {
@@ -221,7 +252,9 @@ impl LocalStorage {
                         .recurrence_cutoff()
                         .is_some_and(|end| end <= event.first_possible_occurrence())
             }))
-            .filter(|event| self.event_is_active(event))
+            .filter(|event| {
+                matches!(event.calendar, CalendarKey::Local(_)) && self.event_is_active(event)
+            })
     }
 
     pub fn search(&self, query: &str) -> Vec<&Event> {
@@ -234,6 +267,14 @@ impl LocalStorage {
 
     pub fn create_event(&mut self, event: Event) -> Result<()> {
         self.ensure_writable()?;
+        if matches!(event.calendar, CalendarKey::Remote { .. })
+            || self
+                .index
+                .get(event.id)
+                .is_some_and(|existing| matches!(existing.calendar, CalendarKey::Remote { .. }))
+        {
+            return Err(crate::Error::Storage("remote events are read-only".into()));
+        }
         if self
             .index
             .get(event.id)
@@ -305,8 +346,11 @@ impl LocalStorage {
 
     pub fn delete_event(&mut self, id: EventId) -> Result<()> {
         self.ensure_writable()?;
-        if self.get_event(id).is_none() {
+        let Some(event) = self.get_event(id) else {
             return Err(crate::Error::Storage("active event not found".into()));
+        };
+        if matches!(event.calendar, CalendarKey::Remote { .. }) {
+            return Err(crate::Error::Storage("remote events are read-only".into()));
         }
         let mut successors = std::collections::HashSet::from([id]);
         loop {

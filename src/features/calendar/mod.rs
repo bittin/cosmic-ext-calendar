@@ -160,20 +160,26 @@ fn event_target<'a>(
             EventMenuAction(action, Some(event.key()), event.display_start),
         )
     };
-    let mut items = vec![
-        item(crate::fl!("edit-event"), CalendarAction::Edit),
-        menu::Item::Divider,
-        item(crate::fl!("calendar-cut"), CalendarAction::Cut),
-        item(crate::fl!("calendar-copy"), CalendarAction::Copy),
-    ];
+    let editable = event.editable;
+    let mut items = Vec::new();
+    if editable {
+        items.extend([
+            item(crate::fl!("edit-event"), CalendarAction::Edit),
+            menu::Item::Divider,
+            item(crate::fl!("calendar-cut"), CalendarAction::Cut),
+        ]);
+    }
+    items.push(item(crate::fl!("calendar-copy"), CalendarAction::Copy));
     if app.calendar_can_paste() {
         items.push(item(crate::fl!("calendar-paste"), CalendarAction::Paste));
     }
-    items.extend([
-        item(crate::fl!("calendar-duplicate"), CalendarAction::Duplicate),
-        menu::Item::Divider,
-        item(crate::fl!("delete"), CalendarAction::Delete),
-    ]);
+    items.push(item(crate::fl!("calendar-duplicate"), CalendarAction::Duplicate));
+    if editable {
+        items.extend([
+            menu::Item::Divider,
+            item(crate::fl!("delete"), CalendarAction::Delete),
+        ]);
+    }
     app.attach_calendar_popup(context_menu(button, items), Some(anchor))
 }
 

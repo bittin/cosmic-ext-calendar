@@ -176,3 +176,6 @@ accounts-error-access-denied = Odmówiono dostępu do tego konta.
 accounts-error-consent-timeout = Żądanie Kont upłynęło.
 accounts-error-failed = Konta nie mogły wykonać żądania.
 accounts-error-unsupported = To konto nie jest obsługiwane.
+accounts-syncing = Synchronizowanie kalendarzy…
+accounts-no-calendars = Nie znaleziono kalendarzy.
+accounts-sync-now = Synchronizuj teraz

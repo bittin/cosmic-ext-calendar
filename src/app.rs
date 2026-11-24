@@ -131,6 +131,9 @@ pub struct AppModel {
     accounts_checked: bool,
     watched_account_ids: Vec<uuid::Uuid>,
     active_accounts: BTreeSet<uuid::Uuid>,
+    account_sync: HashMap<uuid::Uuid, accounts_feature::SyncStatus>,
+    next_account_sync: u64,
+    discovering_accounts: bool,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -343,6 +346,9 @@ impl cosmic::Application for AppModel {
             accounts_checked: false,
             watched_account_ids: Vec::new(),
             active_accounts: BTreeSet::new(),
+            account_sync: HashMap::new(),
+            next_account_sync: 0,
+            discovering_accounts: false,
         };
 
         let mut tasks = Vec::new();
@@ -861,7 +867,7 @@ impl cosmic::Application for AppModel {
                         if let Some((id, start)) = selection {
                             let action = {
                                 let storage = self.storage.lock().unwrap();
-                                storage.get_event(id).map(|event| {
+                                storage.get_event(id).filter(|event| matches!(event.calendar, CalendarKey::Local(_))).map(|event| {
                                     self.editing_event =
                                         Some(EventEditorState::from_event(event, start));
                                     if event.is_recurring() {
@@ -879,7 +885,7 @@ impl cosmic::Application for AppModel {
                     CalendarAction::Copy | CalendarAction::Cut => {
                         if let Some(key) = selection {
                             self.calendar_clipboard = if matches!(action, CalendarAction::Cut) {
-                                Some(CalendarClipboard::Cut(key))
+                                self.event_is_editable(key.0).then_some(CalendarClipboard::Cut(key))
                             } else {
                                 self.storage
                                     .lock()
@@ -959,6 +965,7 @@ impl cosmic::Application for AppModel {
                 self.config = config;
                 if accounts_changed {
                     self.refresh_active_accounts();
+                    tasks.push(self.sync_active_accounts());
                 }
                 self.refresh_display_timezone();
                 if theme_changed {
@@ -1044,6 +1051,9 @@ impl cosmic::Application for AppModel {
                     let Some(event) = storage.get_event(id) else {
                         return Task::none();
                     };
+                    if !matches!(event.calendar, CalendarKey::Local(_)) {
+                        return Task::none();
+                    }
                     let mut state = EventEditorState::from_event(event, date);
                     if state.recurring_series {
                         state.set_recurrence_scope(event, RecurrenceScope::Occurrence);
@@ -1911,13 +1921,16 @@ impl cosmic::Application for AppModel {
             }
             Message::Accounts(action) => match action {
                 AccountsAction::Discover => {
-                    self.accounts_checked = false;
-                    self.accounts_error = None;
+                    if self.discovering_accounts {
+                        return Task::none();
+                    }
+                    self.discovering_accounts = true;
                     return Task::perform(accounts_feature::discover(), |result| {
                         cosmic::action::app(Message::Accounts(AccountsAction::Discovered(result)))
                     });
                 }
                 AccountsAction::Discovered(result) => {
+                    self.discovering_accounts = false;
                     self.accounts_checked = true;
                     match result {
                         Ok(discovery) => {
@@ -1931,7 +1944,7 @@ impl cosmic::Application for AppModel {
                         }
                     }
                     self.refresh_active_accounts();
-                    return Task::none();
+                    return self.sync_active_accounts();
                 }
                 AccountsAction::Changed => {
                     return cosmic::task::message(Message::Accounts(AccountsAction::Discover));
@@ -1940,6 +1953,32 @@ impl cosmic::Application for AppModel {
                     if let Err(err) = accounts::ui::open_add_account() {
                         tasks.push(self.toast(fl!("accounts-app-launch-error", error = err.to_string())));
                     }
+                }
+                AccountsAction::Sync(id) => return self.sync_account(id),
+                AccountsAction::Synced(id, request_id, result) => {
+                    if !matches!(self.account_sync.get(&id), Some(accounts_feature::SyncStatus::Running(current)) if *current == request_id) {
+                        return Task::none();
+                    }
+
+                    if self.calendar_popup.as_ref().is_some_and(|popup| matches!(
+                        &popup.content,
+                        CalendarPopup::Details(_, event, _) if matches!(event.calendar, CalendarKey::Remote { account_id, .. } if account_id == id)
+                    )) {
+                        self.calendar_popup = None;
+                    }
+                    let error = match result {
+                        Ok(snapshot) => {
+                            self.storage.lock().unwrap().replace_remote_snapshot(id, snapshot);
+                            None
+                        }
+                        Err(error) => {
+                            if matches!(error, accounts_feature::Error::AccessDenied | accounts_feature::Error::Disabled | accounts_feature::Error::NeedsReauth) {
+                                self.storage.lock().unwrap().clear_remote_snapshot(id);
+                            }
+                            Some(error)
+                        }
+                    };
+                    self.account_sync.insert(id, accounts_feature::SyncStatus::Finished(std::time::Instant::now(), error));
                 }
                 AccountsAction::SetLocallyEnabled(id, enabled) => {
                     let mut disabled = self.config.disabled_accounts.clone();
@@ -1956,6 +1995,7 @@ impl cosmic::Application for AppModel {
                             Ok(_) => {
                                 self.config = config;
                                 self.refresh_active_accounts();
+                                tasks.push(self.sync_active_accounts());
                             }
                             Err(err) => tasks.push(
                                 self.toast(fl!("account-save-error", error = err.to_string())),
@@ -2093,7 +2133,11 @@ impl AppModel {
                 CalendarKey::Local(id) => storage
                     .get_calendar(id)
                     .map(|calendar| calendar.name.clone()),
-                CalendarKey::Remote { .. } => None,
+                CalendarKey::Remote { account_id, ref calendar_id } => storage
+                    .remote_calendars(account_id)
+                    .iter()
+                    .find(|calendar| calendar.id == *calendar_id)
+                    .map(|calendar| calendar.name.clone()),
             };
             OpenCalendarPopup {
                 content: CalendarPopup::Details(key, Box::new(event.clone()), calendar),
@@ -2209,9 +2253,11 @@ impl AppModel {
                 if let Some(calendar) = calendar {
                     content = content.push(widget::text::caption(calendar.clone()));
                 }
-                content = content.push(widget::button::suggested(fl!("edit-event")).on_press(
-                    Message::CalendarAction(CalendarAction::Edit, Some(*key), start),
-                ));
+                if matches!(event.calendar, CalendarKey::Local(_)) {
+                    content = content.push(widget::button::suggested(fl!("edit-event")).on_press(
+                        Message::CalendarAction(CalendarAction::Edit, Some(*key), start),
+                    ));
+                }
             }
         }
         widget::container(content)
@@ -2246,6 +2292,13 @@ impl AppModel {
                 (event, Some(key))
             }
         };
+        if matches!(event.calendar, CalendarKey::Remote { .. }) {
+            let destination = storage.list_calendars().into_iter()
+                .min_by(|a, b| (!a.visible, &a.name, a.id).cmp(&(!b.visible, &b.name, b.id)))
+                .ok_or_else(|| crate::Error::Storage("destination calendar no longer exists".into()))?;
+            event.calendar = CalendarKey::Local(destination.id);
+            event.source = crate::features::calendar_management::model::Source::Local;
+        }
         let recurring = event.is_recurring();
         let wall = date.replace_offset(time::UtcOffset::UTC);
         let start = match event.time {
@@ -2314,7 +2367,15 @@ impl AppModel {
         Ok(key)
     }
 
+    fn event_is_editable(&self, id: EventId) -> bool {
+        self.storage.lock().unwrap().get_event(id)
+            .is_some_and(|event| matches!(event.calendar, CalendarKey::Local(_)))
+    }
+
     fn begin_event_deletion(&mut self, id: EventId) -> bool {
+        if !self.event_is_editable(id) {
+            return false;
+        }
         let Some(state) = self
             .editing_event
             .as_mut()
@@ -2503,12 +2564,62 @@ impl AppModel {
     }
 
     fn refresh_active_accounts(&mut self) {
-        self.active_accounts = self
+        let active_accounts: BTreeSet<_> = self
             .accounts
             .iter()
             .map(|account| account.id)
             .filter(|id| self.account_locally_enabled(*id))
             .collect();
+        for id in self.active_accounts.difference(&active_accounts) {
+            self.account_sync.remove(id);
+            self.storage.lock().unwrap().clear_remote_snapshot(*id);
+        }
+        if self.active_accounts != active_accounts {
+            self.calendar_popup = None;
+        }
+        self.active_accounts = active_accounts;
+    }
+
+    pub(crate) fn account_sync_status(&self, id: uuid::Uuid) -> Option<&accounts_feature::SyncStatus> {
+        self.account_sync.get(&id)
+    }
+
+    pub(crate) fn remote_calendar_names(&self, id: uuid::Uuid) -> Vec<String> {
+        self.storage.lock().unwrap().remote_calendars(id).iter()
+            .map(|calendar| calendar.name.clone())
+            .collect()
+    }
+
+    fn sync_active_accounts(&mut self) -> Task<cosmic::Action<Message>> {
+        use accounts_feature::{Error, SyncStatus};
+        let ids: Vec<_> = self.active_accounts.iter().copied().filter(|id| {
+            match self.account_sync.get(id) {
+                None => true,
+                Some(SyncStatus::Finished(at, None | Some(Error::Failed | Error::Unavailable))) => {
+                    at.elapsed() >= std::time::Duration::from_secs(300)
+                }
+                _ => false,
+            }
+        }).collect();
+        Task::batch(ids.into_iter().map(|id| self.sync_account(id)).collect::<Vec<_>>())
+    }
+
+    fn sync_account(&mut self, id: uuid::Uuid) -> Task<cosmic::Action<Message>> {
+        use accounts_feature::SyncStatus;
+        if !self.active_accounts.contains(&id)
+            || matches!(self.account_sync.get(&id), Some(SyncStatus::Running(_)))
+        {
+            return Task::none();
+        }
+        let Some(account) = self.accounts.iter().find(|account| account.id == id).cloned() else {
+            return Task::none();
+        };
+        self.next_account_sync += 1;
+        let request_id = self.next_account_sync;
+        self.account_sync.insert(id, SyncStatus::Running(request_id));
+        Task::perform(async move { accounts_feature::dav::sync(&account).await }, move |result| {
+            cosmic::action::app(Message::Accounts(AccountsAction::Synced(id, request_id, result)))
+        })
     }
 
     fn photon_endpoint_input(&self) -> &str {

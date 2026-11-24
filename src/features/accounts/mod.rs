@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+pub mod dav;
 pub mod subscription;
 pub mod view;
 
@@ -86,6 +87,8 @@ pub enum AccountsAction {
     Changed,
     OpenAccountsApp,
     SetLocallyEnabled(Uuid, bool),
+    Sync(Uuid),
+    Synced(Uuid, u64, Result<dav::Snapshot, Error>),
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +107,8 @@ pub async fn discover() -> Result<Discovery, Error> {
     let mut watched_ids: Vec<_> = client
         .list_accounts()
         .await
-        .map_err(AccountsError::from).map_err(Error::from)?
+        .map_err(AccountsError::from)
+        .map_err(Error::from)?
         .into_iter()
         .map(|account| account.id)
         .collect();
@@ -122,5 +126,13 @@ pub async fn discover() -> Result<Discovery, Error> {
     }
 
     accounts.sort_by_key(|account| account.label());
-    Ok(Discovery { accounts, watched_ids })
+    Ok(Discovery {
+        accounts,
+        watched_ids,
+    })
+}
+
+pub enum SyncStatus {
+    Running(u64),
+    Finished(std::time::Instant, Option<Error>),
 }
