@@ -94,6 +94,7 @@ struct Session<'a> {
     client: &'a Client,
     credentials: &'a CalendarCredentials,
     origin: Url,
+    google: bool,
 }
 
 impl Session<'_> {
@@ -150,6 +151,16 @@ impl Session<'_> {
                 StatusCode::FORBIDDEN | StatusCode::MULTI_STATUS => {}
                 _ => return Err(Error::Failed.into()),
             }
+            let insufficient_scope = status == StatusCode::FORBIDDEN
+                && response
+                    .headers()
+                    .get_all(header::WWW_AUTHENTICATE)
+                    .iter()
+                    .any(|value| {
+                        value
+                            .to_str()
+                            .is_ok_and(|value| value.contains("insufficient_scope"))
+                    });
             let mut bytes = Vec::new();
             while let Some(chunk) = response.chunk().await.map_err(|_| Error::Failed)? {
                 if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
@@ -159,14 +170,7 @@ impl Session<'_> {
             }
             let xml = String::from_utf8(bytes).map_err(|_| Error::Failed)?;
             if status == StatusCode::FORBIDDEN {
-                let invalid_token = Document::parse(&xml).ok().is_some_and(|doc| {
-                    child(doc.root_element(), DAV, "valid-sync-token").is_some()
-                });
-                return Err(if invalid_token {
-                    RequestError::InvalidSyncToken
-                } else {
-                    Error::AccessDenied.into()
-                });
+                return Err(forbidden_error(self.google, insufficient_scope, &xml));
             }
             return Ok((url, xml));
         }
@@ -245,6 +249,41 @@ impl Session<'_> {
     }
 }
 
+fn forbidden_error(google: bool, insufficient_scope: bool, body: &str) -> RequestError {
+    if Document::parse(body)
+        .ok()
+        .is_some_and(|doc| child(doc.root_element(), DAV, "valid-sync-token").is_some())
+    {
+        return RequestError::InvalidSyncToken;
+    }
+    if !google {
+        return Error::ServerAccessDenied.into();
+    }
+    if insufficient_scope {
+        return Error::GoogleInsufficientScope.into();
+    }
+
+    // Google APIs may return machine-readable reasons. Never surface the raw
+    // response, which can include account and OAuth project identifiers.
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) {
+        let error = &payload["error"];
+        for field in ["details", "errors"] {
+            for entry in error[field].as_array().into_iter().flatten() {
+                match entry["reason"].as_str() {
+                    Some("SERVICE_DISABLED" | "accessNotConfigured") => {
+                        return Error::GoogleApiDisabled.into();
+                    }
+                    Some("ACCESS_TOKEN_SCOPE_INSUFFICIENT" | "insufficientPermissions") => {
+                        return Error::GoogleInsufficientScope.into();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Error::GoogleAccessDenied.into()
+}
+
 fn endpoint(account: &Account, credentials: &CalendarCredentials) -> Result<Url, Error> {
     let uri = match credentials {
         CalendarCredentials::Basic { uri, .. } | CalendarCredentials::OAuth { uri, .. } => uri,
@@ -283,10 +322,14 @@ async fn fetch(
     credentials: &CalendarCredentials,
     previous: &Snapshot,
 ) -> Result<Snapshot, RequestError> {
+    let origin = endpoint(account, credentials)?;
+    let google =
+        account.provider == "google" && origin.host_str() == Some("apidata.googleusercontent.com");
     let session = Session {
         client,
         credentials,
-        origin: endpoint(account, credentials)?,
+        origin,
+        google,
     };
     let mut snapshot = Snapshot::default();
     for mut calendar in session.collections().await? {
@@ -547,6 +590,38 @@ mod tests {
     use crate::shared::storage::LocalStorage;
 
     #[test]
+    fn identifies_google_forbidden_responses_without_exposing_the_body() {
+        for (scope, body, expected) in [
+            (
+                false,
+                r#"{"error":{"details":[{"reason":"SERVICE_DISABLED"}]}}"#,
+                Error::GoogleApiDisabled,
+            ),
+            (
+                false,
+                r#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#,
+                Error::GoogleInsufficientScope,
+            ),
+            (true, "", Error::GoogleInsufficientScope),
+            (false, "Forbidden", Error::GoogleAccessDenied),
+        ] {
+            assert_eq!(request_error(forbidden_error(true, scope, body)), expected);
+        }
+        assert_eq!(
+            request_error(forbidden_error(false, false, "Forbidden")),
+            Error::ServerAccessDenied
+        );
+        assert!(matches!(
+            forbidden_error(
+                true,
+                false,
+                r#"<error xmlns="DAV:"><valid-sync-token/></error>"#
+            ),
+            RequestError::InvalidSyncToken
+        ));
+    }
+
+    #[test]
     fn google_uses_the_primary_calendar_principal() {
         let account = Account {
             id: Uuid::nil(),
@@ -578,6 +653,7 @@ mod tests {
             client: &client,
             credentials: &credentials,
             origin: url.clone(),
+            google: false,
         };
         let account = Account {
             id: Uuid::new_v4(),

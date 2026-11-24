@@ -82,6 +82,10 @@ impl AppModel {
                         if matches!(
                             error,
                             accounts_feature::Error::AccessDenied
+                                | accounts_feature::Error::ServerAccessDenied
+                                | accounts_feature::Error::GoogleAccessDenied
+                                | accounts_feature::Error::GoogleApiDisabled
+                                | accounts_feature::Error::GoogleInsufficientScope
                                 | accounts_feature::Error::Disabled
                                 | accounts_feature::Error::NeedsReauth
                         ) {
