@@ -20,6 +20,14 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 - `just check` runs clippy on the project to check for linter warnings
 - `just check-json` can be used by IDEs that support LSP
 
+## Online calendars
+
+Add an HTTPS CalDAV account in Accounts for COSMIC, then open **Settings → Accounts** in Calendar. Enabled accounts refresh automatically. **Sync now** retries a connection immediately.
+
+Online calendars are read-only. Calendar keeps the current sync results in memory. The separate notification worker delivers alerts for local calendars, and the running Calendar app also checks alerts for synced events.
+
+The Flatpak connects to the Accounts service installed on the host. Its **Open** button requires an Accounts installation that registers the `cosmic-accounts` URI handler.
+
 ## Translators
 
 [Fluent][fluent] is used for localization of the software. Fluent's translation files are found in the [i18n directory](./i18n). New translations may copy the [English (en) localization](./i18n/en) of the project, rename `en` to the desired [ISO 639-1 language code][iso-codes], and then translations can be provided for each [message identifier][fluent-guide]. If no translation is necessary, the message may be omitted.

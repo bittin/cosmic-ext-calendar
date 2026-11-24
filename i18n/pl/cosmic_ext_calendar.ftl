@@ -179,3 +179,4 @@ accounts-error-unsupported = To konto nie jest obsługiwane.
 accounts-syncing = Synchronizowanie kalendarzy…
 accounts-no-calendars = Nie znaleziono kalendarzy.
 accounts-sync-now = Synchronizuj teraz
+accounts-error-microsoft-graph = Synchronizacja kalendarza Microsoft wymaga obsługi Microsoft Graph.

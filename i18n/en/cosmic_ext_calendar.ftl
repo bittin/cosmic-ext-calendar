@@ -216,3 +216,4 @@ accounts-error-unsupported = This account is not supported.
 accounts-syncing = Syncing calendars…
 accounts-no-calendars = No calendars found.
 accounts-sync-now = Sync now
+accounts-error-microsoft-graph = Microsoft calendar sync requires Microsoft Graph support.

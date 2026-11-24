@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use accounts::{AccountsClient, CalendarCredentials};
-use reqwest::{Client, Method, StatusCode, Url};
+use reqwest::{header, Client, Method, StatusCode, Url};
 use roxmltree::{Document, Node};
 use uuid::Uuid;
 
@@ -18,7 +18,7 @@ const DAV: &str = "DAV:";
 const CALDAV: &str = "urn:ietf:params:xml:ns:caldav";
 const DISCOVERY: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
     <d:prop><d:resourcetype/><d:displayname/><d:current-user-principal/>
-        <c:calendar-home-set/><c:supported-calendar-component-set/></d:prop>
+        <c:calendar-home-set/><c:supported-calendar-component-set/><d:sync-token/></d:prop>
 </d:propfind>"#;
 const EVENTS: &str = r#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
     <d:prop><d:getetag/><c:calendar-data/></d:prop>
@@ -29,9 +29,10 @@ const EVENTS: &str = r#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:param
 pub struct Calendar {
     pub id: String,
     pub name: String,
+    pub sync_token: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub calendars: Vec<Calendar>,
     pub events: Vec<Event>,
@@ -40,6 +41,7 @@ pub struct Snapshot {
 #[derive(Debug)]
 enum RequestError {
     Unauthorized,
+    InvalidSyncToken,
     Other(Error),
 }
 
@@ -49,7 +51,10 @@ impl From<Error> for RequestError {
     }
 }
 
-pub async fn sync(account: &Account) -> Result<Snapshot, Error> {
+pub async fn sync(account: &Account, previous: Snapshot) -> Result<Snapshot, Error> {
+    if account.provider == "microsoft" {
+        return Err(Error::MicrosoftGraphRequired);
+    }
     let broker = AccountsClient::connect().await.map_err(Error::from)?;
     let http = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -61,7 +66,7 @@ pub async fn sync(account: &Account) -> Result<Snapshot, Error> {
         .calendar_credentials(&account.id, false)
         .await
         .map_err(Error::from)?;
-    match fetch(&http, account, &credentials).await {
+    match fetch(&http, account, &credentials, &previous).await {
         Err(RequestError::Unauthorized)
             if matches!(credentials, CalendarCredentials::OAuth { .. }) =>
         {
@@ -69,7 +74,7 @@ pub async fn sync(account: &Account) -> Result<Snapshot, Error> {
                 .calendar_credentials(&account.id, true)
                 .await
                 .map_err(Error::from)?;
-            fetch(&http, account, &refreshed)
+            fetch(&http, account, &refreshed, &previous)
                 .await
                 .map_err(request_error)
         }
@@ -80,6 +85,7 @@ pub async fn sync(account: &Account) -> Result<Snapshot, Error> {
 fn request_error(error: RequestError) -> Error {
     match error {
         RequestError::Unauthorized => Error::NeedsReauth,
+        RequestError::InvalidSyncToken => Error::Failed,
         RequestError::Other(error) => error,
     }
 }
@@ -108,74 +114,96 @@ impl Session<'_> {
         url: &Url,
         method: &str,
         depth: &str,
-        body: &'static str,
-    ) -> Result<String, RequestError> {
+        body: &str,
+    ) -> Result<(Url, String), RequestError> {
         let method = Method::from_bytes(method.as_bytes()).map_err(|_| Error::Failed)?;
-        let request = self
-            .client
-            .request(method, url.clone())
-            .header("Depth", depth)
-            .header("Content-Type", "application/xml; charset=utf-8")
-            .body(body);
-        let request = match self.credentials {
-            CalendarCredentials::Basic {
-                username, password, ..
-            } => request.basic_auth(username, Some(password)),
-            CalendarCredentials::OAuth { token, .. } => request.bearer_auth(token),
-        };
-
-        let mut response = request.send().await.map_err(|_| Error::Failed)?;
-        match response.status() {
-            StatusCode::UNAUTHORIZED => return Err(RequestError::Unauthorized),
-            StatusCode::FORBIDDEN => return Err(Error::AccessDenied.into()),
-            StatusCode::MULTI_STATUS => {}
-            _ => return Err(Error::Failed.into()),
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| Error::Failed)? {
-            if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
-                return Err(Error::Failed.into());
+        let mut url = url.clone();
+        for _ in 0..5 {
+            let request = self
+                .client
+                .request(method.clone(), url.clone())
+                .header("Depth", depth)
+                .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+                .body(body.to_owned());
+            let request = match self.credentials {
+                CalendarCredentials::Basic {
+                    username, password, ..
+                } => request.basic_auth(username, Some(password)),
+                CalendarCredentials::OAuth { token, .. } => request.bearer_auth(token),
+            };
+            let mut response = request.send().await.map_err(|_| Error::Failed)?;
+            let status = response.status();
+            match status {
+                StatusCode::MOVED_PERMANENTLY
+                | StatusCode::FOUND
+                | StatusCode::TEMPORARY_REDIRECT
+                | StatusCode::PERMANENT_REDIRECT => {
+                    let location = response
+                        .headers()
+                        .get(header::LOCATION)
+                        .and_then(|value| value.to_str().ok())
+                        .ok_or(Error::Failed)?;
+                    url = self.resolve(&url, location)?;
+                    continue;
+                }
+                StatusCode::UNAUTHORIZED => return Err(RequestError::Unauthorized),
+                StatusCode::FORBIDDEN | StatusCode::MULTI_STATUS => {}
+                _ => return Err(Error::Failed.into()),
             }
-            bytes.extend_from_slice(&chunk);
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| Error::Failed)? {
+                if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
+                    return Err(Error::Failed.into());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let xml = String::from_utf8(bytes).map_err(|_| Error::Failed)?;
+            if status == StatusCode::FORBIDDEN {
+                let invalid_token = Document::parse(&xml).ok().is_some_and(|doc| {
+                    child(doc.root_element(), DAV, "valid-sync-token").is_some()
+                });
+                return Err(if invalid_token {
+                    RequestError::InvalidSyncToken
+                } else {
+                    Error::AccessDenied.into()
+                });
+            }
+            return Ok((url, xml));
         }
-        String::from_utf8(bytes).map_err(|_| Error::Failed.into())
+        Err(Error::Failed.into())
     }
 
-    async fn collections(&self) -> Result<Vec<(Url, String)>, RequestError> {
-        let xml = self
+    async fn collections(&self) -> Result<Vec<Calendar>, RequestError> {
+        let (url, xml) = self
             .request(&self.origin, "PROPFIND", "0", DISCOVERY)
             .await?;
         let doc = multistatus(&xml)?;
-        let mut calendars = self.read_collections(&self.origin, &doc)?;
+        let mut calendars = self.read_collections(&url, &doc)?;
         if !calendars.is_empty() {
             return Ok(calendars);
         }
         let home = property_href(&doc, CALDAV, "calendar-home-set");
         let home = if let Some(home) = home {
-            self.resolve(&self.origin, home)?
+            self.resolve(&url, home)?
         } else if let Some(principal) = property_href(&doc, DAV, "current-user-principal") {
-            let principal = self.resolve(&self.origin, principal)?;
-            let xml = self.request(&principal, "PROPFIND", "0", DISCOVERY).await?;
+            let principal = self.resolve(&url, principal)?;
+            let (principal, xml) = self.request(&principal, "PROPFIND", "0", DISCOVERY).await?;
             let doc = multistatus(&xml)?;
             let home =
                 property_href(&doc, CALDAV, "calendar-home-set").ok_or(Error::Unsupported)?;
             self.resolve(&principal, home)?
         } else {
-            self.origin.clone()
+            url
         };
 
-        let xml = self.request(&home, "PROPFIND", "1", DISCOVERY).await?;
+        let (home, xml) = self.request(&home, "PROPFIND", "1", DISCOVERY).await?;
         let doc = multistatus(&xml)?;
         calendars = self.read_collections(&home, &doc)?;
-        calendars.sort_by(|left, right| left.1.cmp(&right.1));
+        calendars.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(calendars)
     }
 
-    fn read_collections(
-        &self,
-        base: &Url,
-        doc: &Document<'_>,
-    ) -> Result<Vec<(Url, String)>, Error> {
+    fn read_collections(&self, base: &Url, doc: &Document<'_>) -> Result<Vec<Calendar>, Error> {
         let mut seen = HashSet::new();
         let mut calendars = Vec::new();
         for response in responses(doc) {
@@ -202,55 +230,205 @@ impl Session<'_> {
                 .unwrap_or(url.path())
                 .to_owned();
             if seen.insert(url.clone()) {
-                calendars.push((url, name));
+                let sync_token = property(response, DAV, "sync-token")
+                    .and_then(|node| node.text())
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_owned);
+                calendars.push(Calendar {
+                    id: url.to_string(),
+                    name,
+                    sync_token,
+                });
             }
         }
         Ok(calendars)
     }
 }
 
-async fn fetch(
-    client: &Client,
-    account: &Account,
-    credentials: &CalendarCredentials,
-) -> Result<Snapshot, RequestError> {
+fn endpoint(account: &Account, credentials: &CalendarCredentials) -> Result<Url, Error> {
     let uri = match credentials {
         CalendarCredentials::Basic { uri, .. } | CalendarCredentials::OAuth { uri, .. } => uri,
     };
-    let origin = Url::parse(uri).map_err(|_| Error::Unsupported)?;
+    let mut origin = Url::parse(uri).map_err(|_| Error::Unsupported)?;
     if origin.scheme() != "https"
         || !origin.username().is_empty()
         || origin.password().is_some()
         || origin.fragment().is_some()
     {
-        return Err(Error::Unsupported.into());
+        return Err(Error::Unsupported);
     }
+    // The bundled Google manifest advertises the API root. Google's
+    // principal endpoint uses the primary calendar ID (the account email).
+    if account.provider == "google"
+        && origin.as_str() == "https://apidata.googleusercontent.com/caldav/v2/"
+    {
+        let email = account
+            .email
+            .as_deref()
+            .filter(|email| !email.is_empty())
+            .ok_or(Error::Unsupported)?;
+        origin
+            .path_segments_mut()
+            .map_err(|_| Error::Unsupported)?
+            .pop_if_empty()
+            .push(email)
+            .push("user");
+    }
+    Ok(origin)
+}
+
+async fn fetch(
+    client: &Client,
+    account: &Account,
+    credentials: &CalendarCredentials,
+    previous: &Snapshot,
+) -> Result<Snapshot, RequestError> {
     let session = Session {
         client,
         credentials,
-        origin,
+        origin: endpoint(account, credentials)?,
     };
-    let mut snapshot = Snapshot {
-        calendars: Vec::new(),
-        events: Vec::new(),
-    };
-    for (url, name) in session.collections().await? {
-        let xml = session.request(&url, "REPORT", "1", EVENTS).await?;
-        let id = url.to_string();
+    let mut snapshot = Snapshot::default();
+    for mut calendar in session.collections().await? {
+        let url = Url::parse(&calendar.id).map_err(|_| Error::Failed)?;
+        let prior_token = previous
+            .calendars
+            .iter()
+            .find(|prior| prior.id == calendar.id)
+            .and_then(|prior| prior.sync_token.as_deref());
+
+        if let Some(token) = prior_token {
+            if calendar.sync_token.as_deref() == Some(token) {
+                snapshot
+                    .events
+                    .extend(calendar_events(previous, &calendar).cloned());
+                snapshot.calendars.push(calendar);
+                continue;
+            }
+            match sync_changes(&session, account, &url, token).await {
+                Ok((token, changed, events)) => {
+                    snapshot.events.extend(
+                        calendar_events(previous, &calendar)
+                            .filter(|event| {
+                                event.external.as_ref().is_some_and(|remote| {
+                                    !changed.contains(&remote.provider_event_id)
+                                })
+                            })
+                            .cloned(),
+                    );
+                    snapshot.events.extend(events);
+                    calendar.sync_token = Some(token);
+                    snapshot.calendars.push(calendar);
+                    continue;
+                }
+                Err(RequestError::InvalidSyncToken) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let (response_url, xml) = session.request(&url, "REPORT", "1", EVENTS).await?;
         snapshot
             .events
-            .extend(parse_events(&session, account, &url, &xml)?);
-        snapshot.calendars.push(Calendar { id, name });
+            .extend(parse_event_changes(&session, account, &url, &response_url, &xml)?.1);
+        snapshot.calendars.push(calendar);
     }
     Ok(snapshot)
 }
 
-fn parse_events(
+fn calendar_events<'a>(
+    previous: &'a Snapshot,
+    calendar: &Calendar,
+) -> impl Iterator<Item = &'a Event> {
+    let id = calendar.id.clone();
+    previous.events.iter().filter(move |event| {
+        matches!(&event.calendar, CalendarKey::Remote { calendar_id, .. } if *calendar_id == id)
+    })
+}
+
+async fn sync_changes(
     session: &Session<'_>,
     account: &Account,
     url: &Url,
+    token: &str,
+) -> Result<(String, HashSet<String>, Vec<Event>), RequestError> {
+    let token = xml_text(token);
+    let body = format!(
+        r#"<d:sync-collection xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+        <d:sync-token>{token}</d:sync-token><d:sync-level>1</d:sync-level>
+        <d:prop><d:getetag/></d:prop>
+    </d:sync-collection>"#
+    );
+    let (response_url, xml) = session.request(url, "REPORT", "0", &body).await?;
+    let doc = multistatus(&xml)?;
+    let token = child(doc.root_element(), DAV, "sync-token")
+        .and_then(|node| node.text())
+        .filter(|token| !token.is_empty())
+        .ok_or(Error::Failed)?;
+    let token = token.to_owned();
+    let mut changed = HashSet::new();
+    let mut downloads = Vec::new();
+    for response in responses(&doc) {
+        let resource = response_url_for(session, &response_url, response)?;
+        let status = child(response, DAV, "status").and_then(status_code);
+        if status != Some("404") && property(response, DAV, "getetag").is_none() {
+            return Err(Error::Failed.into());
+        }
+        if changed.insert(resource.to_string()) && status != Some("404") {
+            downloads.push(resource);
+        }
+    }
+
+    let mut events = Vec::new();
+    for batch in downloads.chunks(100) {
+        let mut body = String::from(
+            r#"<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop>"#,
+        );
+        for resource in batch {
+            body.push_str("<d:href>");
+            body.push_str(&xml_text(resource.path()));
+            if let Some(query) = resource.query() {
+                body.push('?');
+                body.push_str(&xml_text(query));
+            }
+            body.push_str("</d:href>");
+        }
+        body.push_str("</c:calendar-multiget>");
+        let (response_url, xml) = session.request(url, "REPORT", "0", &body).await?;
+        let (received, mut records) =
+            parse_event_changes(session, account, url, &response_url, &xml)?;
+        if received.len() != batch.len() || !batch.iter().all(|url| received.contains(url.as_str()))
+        {
+            return Err(Error::Failed.into());
+        }
+        events.append(&mut records);
+    }
+    Ok((token, changed, events))
+}
+
+fn xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn response_url_for(
+    session: &Session<'_>,
+    base: &Url,
+    response: Node<'_, '_>,
+) -> Result<Url, Error> {
+    let href = child(response, DAV, "href")
+        .and_then(|node| node.text())
+        .ok_or(Error::Failed)?;
+    session.resolve(base, href)
+}
+
+fn parse_event_changes(
+    session: &Session<'_>,
+    account: &Account,
+    url: &Url,
+    response_url: &Url,
     xml: &str,
-) -> Result<Vec<Event>, Error> {
+) -> Result<(HashSet<String>, Vec<Event>), Error> {
     let doc = multistatus(xml)?;
     let mut events = Vec::new();
     let mut resources = HashSet::new();
@@ -260,16 +438,16 @@ fn parse_events(
         calendar_id: calendar_id.clone(),
     };
     for response in responses(&doc) {
-        let data = property(response, CALDAV, "calendar-data")
-            .and_then(|node| node.text())
-            .ok_or(Error::Failed)?;
-        let href = child(response, DAV, "href")
-            .and_then(|node| node.text())
-            .ok_or(Error::Failed)?;
-        let resource = session.resolve(url, href)?.to_string();
+        let resource = response_url_for(session, response_url, response)?.to_string();
         if !resources.insert(resource.clone()) {
             continue;
         }
+        if child(response, DAV, "status").and_then(status_code) == Some("404") {
+            continue;
+        }
+        let data = property(response, CALDAV, "calendar-data")
+            .and_then(|node| node.text())
+            .ok_or(Error::Failed)?;
         let etag = property(response, DAV, "getetag")
             .and_then(|node| node.text())
             .map(str::to_owned);
@@ -282,7 +460,10 @@ fn parse_events(
             // CalDAV stores a recurring event and its overrides in one resource.
             let identity = format!(
                 "{calendar_id}\n{resource}\n{:?}\n{:?}",
-                event.ics_uid, event.recurrence_id
+                event.ics_uid,
+                event
+                    .recurrence_id
+                    .map(time::OffsetDateTime::unix_timestamp_nanos)
             );
             let id = EventId(Uuid::new_v5(&account.id, identity.as_bytes()));
             ids.insert(event.id, id);
@@ -305,7 +486,7 @@ fn parse_events(
         }
         events.extend(parsed);
     }
-    Ok(events)
+    Ok((resources, events))
 }
 
 fn multistatus(xml: &str) -> Result<Document<'_>, Error> {
@@ -351,6 +532,10 @@ fn property<'a, 'input>(
         })
 }
 
+fn status_code<'a>(node: Node<'a, '_>) -> Option<&'a str> {
+    node.text()?.split_whitespace().nth(1)
+}
+
 fn property_href<'a>(doc: &'a Document<'_>, namespace: &str, name: &str) -> Option<&'a str> {
     responses(doc)
         .find_map(|response| child(property(response, namespace, name)?, DAV, "href")?.text())
@@ -360,6 +545,25 @@ fn property_href<'a>(doc: &'a Document<'_>, namespace: &str, name: &str) -> Opti
 mod tests {
     use super::*;
     use crate::shared::storage::LocalStorage;
+
+    #[test]
+    fn google_uses_the_primary_calendar_principal() {
+        let account = Account {
+            id: Uuid::nil(),
+            display_name: "Google".into(),
+            email: Some("person+calendar@example.org".into()),
+            provider: "google".into(),
+        };
+        let credentials = CalendarCredentials::OAuth {
+            uri: "https://apidata.googleusercontent.com/caldav/v2/".into(),
+            token: String::new(),
+            expires_at: 0,
+        };
+        assert_eq!(
+            endpoint(&account, &credentials).unwrap().as_str(),
+            "https://apidata.googleusercontent.com/caldav/v2/person+calendar@example.org/user",
+        );
+    }
 
     #[tokio::test]
     async fn replacing_a_snapshot_preserves_identity_and_removes_deleted_events() {
@@ -398,7 +602,9 @@ END:VCALENDAR
             )
         };
         let mut storage = LocalStorage::unavailable("test store".into());
-        let first = parse_events(&session, &account, &url, &response("First")).unwrap();
+        let first = parse_event_changes(&session, &account, &url, &url, &response("First"))
+            .unwrap()
+            .1;
         let id = first[0].id;
         storage.replace_remote_snapshot(
             account.id,
@@ -408,7 +614,9 @@ END:VCALENDAR
             },
         );
 
-        let updated = parse_events(&session, &account, &url, &response("Updated")).unwrap();
+        let updated = parse_event_changes(&session, &account, &url, &url, &response("Updated"))
+            .unwrap()
+            .1;
         storage.replace_remote_snapshot(
             account.id,
             Snapshot {
@@ -422,14 +630,22 @@ END:VCALENDAR
         let other_origin =
             response("Updated").replace("/calendar/one.ics", "https://other.example/one.ics");
         assert!(matches!(
-            parse_events(&session, &account, &url, &other_origin),
+            parse_event_changes(&session, &account, &url, &url, &other_origin),
             Err(Error::Unsupported)
         ));
+        let deletion = r#"<d:multistatus xmlns:d="DAV:">
+            <d:response><d:href>/calendar/one.ics</d:href>
+            <d:status>HTTP/1.1 404 Not Found</d:status></d:response>
+        </d:multistatus>"#;
+        let (changed, events) =
+            parse_event_changes(&session, &account, &url, &url, deletion).unwrap();
+        assert!(changed.contains("https://example.org/calendar/one.ics"));
+        assert!(events.is_empty());
         storage.replace_remote_snapshot(
             account.id,
             Snapshot {
                 calendars: vec![],
-                events: vec![],
+                events,
             },
         );
         assert!(storage.get_event(id).is_none());

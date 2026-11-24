@@ -48,6 +48,7 @@ pub enum Error {
     ConsentTimeout,
     Failed,
     Unsupported,
+    MicrosoftGraphRequired,
 }
 
 impl From<AccountsError> for Error {
@@ -76,6 +77,7 @@ impl Error {
             Self::ConsentTimeout => fl!("accounts-error-consent-timeout"),
             Self::Failed => fl!("accounts-error-failed"),
             Self::Unsupported => fl!("accounts-error-unsupported"),
+            Self::MicrosoftGraphRequired => fl!("accounts-error-microsoft-graph"),
         }
     }
 }

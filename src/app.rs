@@ -1828,11 +1828,12 @@ impl cosmic::Application for AppModel {
                     tasks.push(Task::perform(
                         {
                             let storage = self.storage.clone();
+                            let active_accounts = self.active_accounts.clone();
                             async move {
                                 tokio::task::spawn_blocking(move || {
                                     let remote_events: Vec<_> = storage.lock().unwrap()
                                         .all_events().into_iter()
-                                        .filter(|event| matches!(event.calendar, CalendarKey::Remote { .. }))
+                                        .filter(|event| matches!(event.calendar, CalendarKey::Remote { account_id, .. } if active_accounts.contains(&account_id)))
                                         .cloned()
                                         .collect();
                                     check_alerts(&remote_events)
@@ -2634,7 +2635,8 @@ impl AppModel {
         self.next_account_sync += 1;
         let request_id = self.next_account_sync;
         self.account_sync.insert(id, SyncStatus::Running(request_id));
-        Task::perform(async move { accounts_feature::dav::sync(&account).await }, move |result| {
+        let previous = self.storage.lock().unwrap().remote_sync_seed(id);
+        Task::perform(async move { accounts_feature::dav::sync(&account, previous).await }, move |result| {
             cosmic::action::app(Message::Accounts(AccountsAction::Synced(id, request_id, result)))
         })
     }

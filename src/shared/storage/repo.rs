@@ -227,6 +227,27 @@ impl LocalStorage {
             .unwrap_or_default()
     }
 
+    pub fn remote_sync_seed(&self, account_id: Uuid) -> Snapshot {
+        let calendars: Vec<_> = self
+            .remote_calendars(account_id)
+            .iter()
+            .filter(|calendar| calendar.sync_token.is_some())
+            .cloned()
+            .collect();
+        let ids: std::collections::HashSet<_> =
+            calendars.iter().map(|calendar| &calendar.id).collect();
+        let events = self
+            .index
+            .all_records()
+            .filter(|event| {
+                matches!(&event.calendar, CalendarKey::Remote { account_id: id, calendar_id }
+                if *id == account_id && ids.contains(calendar_id))
+            })
+            .cloned()
+            .collect();
+        Snapshot { calendars, events }
+    }
+
     pub fn get_event(&self, id: EventId) -> Option<&Event> {
         self.index
             .get(id)
