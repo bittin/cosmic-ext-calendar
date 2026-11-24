@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{AppModel, ContextPage, Message};
 use crate::config::Config;
-use crate::features::accounts::{Account, AccountsAction, Error, SyncStatus};
+use crate::features::accounts::{Account, AccountsAction, SyncStatus};
 use crate::features::calendar_management::{
     model::{calendar_color, CalendarKey},
     view::calendar_color_icon,
@@ -69,13 +69,7 @@ impl Sidebar {
     ) -> bool {
         let failed = status.and_then(SyncStatus::error).is_some();
         let refresh = matches!(group, Group::Account(_))
-            && !matches!(
-                status,
-                Some(
-                    SyncStatus::Running { .. }
-                        | SyncStatus::Finished(_, Some(Error::MicrosoftGraphRequired))
-                )
-            );
+            && !matches!(status, Some(SyncStatus::Running { .. }));
         let collapsed = self.collapsed.contains(&group);
         let icon = match group {
             Group::Local => Icon::LocalCalendars,
@@ -416,7 +410,7 @@ impl menu::action::MenuAction for MenuAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::accounts::dav::{Calendar, Snapshot};
+    use crate::features::accounts::{Calendar, Snapshot};
 
     #[test]
     fn lists_accounts_directly_and_keeps_visibility_per_account() {

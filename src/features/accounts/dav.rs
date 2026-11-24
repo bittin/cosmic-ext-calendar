@@ -6,7 +6,7 @@ use reqwest::{header, Client, Method, StatusCode, Url};
 use roxmltree::{Document, Node};
 use uuid::Uuid;
 
-use super::{Account, Error};
+use super::{Account, Calendar, Error, Snapshot};
 use crate::features::{
     calendar_management::model::{CalendarKey, Source},
     event::model::{Event, EventKind, ExternalRef},
@@ -25,19 +25,6 @@ const EVENTS: &str = r#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:param
     <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"/></c:comp-filter></c:filter>
 </c:calendar-query>"#;
 
-#[derive(Clone, Debug)]
-pub struct Calendar {
-    pub id: String,
-    pub name: String,
-    pub sync_token: Option<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Snapshot {
-    pub calendars: Vec<Calendar>,
-    pub events: Vec<Event>,
-}
-
 #[derive(Debug)]
 enum RequestError {
     Unauthorized,
@@ -52,9 +39,6 @@ impl From<Error> for RequestError {
 }
 
 pub async fn sync(account: &Account, previous: Snapshot) -> Result<Snapshot, Error> {
-    if account.provider == "microsoft" {
-        return Err(Error::MicrosoftGraphRequired);
-    }
     let broker = AccountsClient::connect().await.map_err(Error::from)?;
     let http = Client::builder()
         .redirect(reqwest::redirect::Policy::none())

@@ -86,6 +86,7 @@ impl AppModel {
                                 | accounts_feature::Error::GoogleAccessDenied
                                 | accounts_feature::Error::GoogleApiDisabled
                                 | accounts_feature::Error::GoogleInsufficientScope
+                                | accounts_feature::Error::MicrosoftAccessDenied
                                 | accounts_feature::Error::Disabled
                                 | accounts_feature::Error::NeedsReauth
                         ) {

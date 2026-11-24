@@ -22,7 +22,14 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 
 ## Online calendars
 
-Add an HTTPS CalDAV account in Accounts for COSMIC, then open **Settings → Accounts** in Calendar. Enabled accounts refresh automatically. **Sync now** retries a connection immediately.
+Add your account in Accounts for COSMIC, then open **Settings → Accounts** in Calendar.
+Enabled accounts refresh automatically. Use the refresh button beside an account in the
+sidebar to retry immediately.
+
+Microsoft accounts use Microsoft Graph and the delegated `Calendars.Read` permission.
+If this permission was added after sign-in, reconnect the account in Accounts for COSMIC.
+Calendar shows Microsoft event occurrences from roughly one year before today through
+one year after today.
 
 Online calendars are read-only. Calendar keeps the current sync results in memory. The separate notification worker delivers alerts for local calendars, and the running Calendar app also checks alerts for synced events.
 

@@ -1392,7 +1392,7 @@ impl AppModel {
         );
         self.refresh_calendar_nav();
         let previous = self.storage.lock().unwrap().remote_sync_seed(id);
-        Task::perform(async move { accounts_feature::dav::sync(&account, previous).await }, move |result| {
+        Task::perform(async move { accounts_feature::sync(&account, previous).await }, move |result| {
             cosmic::action::app(Message::Accounts(AccountsAction::Synced(id, request_id, result)))
         })
     }

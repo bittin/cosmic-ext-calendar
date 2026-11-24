@@ -224,7 +224,7 @@ accounts-error-unsupported = This account is not supported.
 accounts-syncing = Syncing calendars…
 accounts-retrying = Retrying sync. Last error: { $error }
 accounts-no-calendars = No calendars found.
-accounts-error-microsoft-graph = Microsoft calendar sync requires Microsoft Graph support.
+accounts-error-microsoft-denied = Microsoft denied calendar access. Check that the app has delegated Calendars.Read permission, then reconnect the account.
 
 keyboard-shortcuts = Keyboard shortcuts
 shortcut-general = General

@@ -6,7 +6,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::{atomic, index::EventIndex, migration, paths};
-use crate::features::accounts::dav::{Calendar, Snapshot};
+use crate::features::accounts::{Calendar, Snapshot};
 use crate::features::calendar_management::model::{
     CalendarKey, LocalCalendarMeta, CURRENT_CALENDAR_SCHEMA_VERSION,
 };

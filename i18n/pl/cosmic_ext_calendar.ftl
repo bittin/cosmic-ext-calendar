@@ -187,7 +187,7 @@ accounts-error-unsupported = To konto nie jest obsługiwane.
 accounts-syncing = Synchronizowanie kalendarzy…
 accounts-retrying = Ponawianie synchronizacji. Ostatni błąd: { $error }
 accounts-no-calendars = Nie znaleziono kalendarzy.
-accounts-error-microsoft-graph = Synchronizacja kalendarza Microsoft wymaga obsługi Microsoft Graph.
+accounts-error-microsoft-denied = Microsoft odmówił dostępu do kalendarza. Sprawdź, czy aplikacja ma delegowane uprawnienie Calendars.Read, a następnie połącz konto ponownie.
 
 keyboard-shortcuts = Skróty klawiszowe
 shortcut-general = Ogólne

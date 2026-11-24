@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-pub mod dav;
+mod dav;
+mod graph;
 pub mod subscription;
 pub mod view;
 
-use crate::fl;
+use crate::{features::event::model::Event, fl};
 use accounts::{models::Service, AccountsClient, AccountsError};
 use uuid::Uuid;
 
@@ -71,7 +72,7 @@ pub enum Error {
     ConsentTimeout,
     Failed,
     Unsupported,
-    MicrosoftGraphRequired,
+    MicrosoftAccessDenied,
 }
 
 impl From<AccountsError> for Error {
@@ -104,8 +105,28 @@ impl Error {
             Self::ConsentTimeout => fl!("accounts-error-consent-timeout"),
             Self::Failed => fl!("accounts-error-failed"),
             Self::Unsupported => fl!("accounts-error-unsupported"),
-            Self::MicrosoftGraphRequired => fl!("accounts-error-microsoft-graph"),
+            Self::MicrosoftAccessDenied => fl!("accounts-error-microsoft-denied"),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Calendar {
+    pub id: String,
+    pub name: String,
+    pub sync_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub calendars: Vec<Calendar>,
+    pub events: Vec<Event>,
+}
+
+pub async fn sync(account: &Account, previous: Snapshot) -> Result<Snapshot, Error> {
+    match account.provider.as_str() {
+        "microsoft" => graph::sync(account).await,
+        _ => dav::sync(account, previous).await,
     }
 }
 
@@ -118,7 +139,7 @@ pub enum AccountsAction {
     AccountsAppOpened(Result<(), String>),
     SetLocallyEnabled(Uuid, bool),
     Sync(Uuid),
-    Synced(Uuid, u64, Result<dav::Snapshot, Error>),
+    Synced(Uuid, u64, Result<Snapshot, Error>),
 }
 
 #[derive(Clone, Debug)]
