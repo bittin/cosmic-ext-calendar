@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::prelude::*;
@@ -8,7 +8,7 @@ use cosmic::widget::{self, menu, nav_bar};
 use cosmic::Application;
 use uuid::Uuid;
 
-use super::{AppModel, ContextPage, Message};
+use super::{AppModel, Message};
 use crate::config::Config;
 use crate::features::accounts::{Account, AccountsAction};
 use crate::features::calendar_management::{
@@ -22,7 +22,6 @@ use crate::shared::{ids::CalendarId, storage::LocalStorage};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Group {
     Local,
-    Provider(String),
     Account(Uuid),
 }
 
@@ -30,7 +29,6 @@ enum Group {
 enum Item {
     Group(Group),
     Calendar(CalendarKey),
-    ManageAccounts,
 }
 
 #[derive(PartialEq, Eq)]
@@ -42,7 +40,6 @@ enum Icon {
         color: Option<String>,
         visible: bool,
     },
-    Accounts,
 }
 
 #[derive(PartialEq, Eq)]
@@ -93,57 +90,28 @@ impl Sidebar {
             }));
         }
 
-        let mut providers = BTreeMap::<_, Vec<_>>::new();
         for account in accounts
             .iter()
             .filter(|account| active_accounts.contains(&account.id))
         {
-            providers
-                .entry(account.provider.as_str())
-                .or_default()
-                .push(account);
-        }
-        let mut providers: Vec<_> = providers
-            .into_iter()
-            .map(|(id, accounts)| (provider_label(id), id, accounts))
-            .collect();
-        providers.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-        for (provider, provider_id, accounts) in providers {
-            if !self.group(
-                Group::Provider(provider_id.to_owned()),
-                provider,
-                0,
-                &mut rows,
-            ) {
+            if !self.group(Group::Account(account.id), account.label(), 0, &mut rows) {
                 continue;
             }
-            for account in accounts {
-                if !self.group(Group::Account(account.id), account.label(), 1, &mut rows) {
-                    continue;
-                }
-                let mut calendars: Vec<_> = storage.remote_calendars(account.id).iter().collect();
-                calendars.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
-                rows.extend(calendars.into_iter().map(|calendar| Row {
-                    item: Item::Calendar(CalendarKey::Remote {
-                        account_id: account.id,
-                        calendar_id: calendar.id.clone(),
-                    }),
-                    label: calendar.name.clone(),
-                    indent: 2,
-                    icon: Icon::Calendar {
-                        color: None,
-                        visible: !config.remote_calendar_hidden(account.id, &calendar.id),
-                    },
-                }));
-            }
+            let mut calendars: Vec<_> = storage.remote_calendars(account.id).iter().collect();
+            calendars.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+            rows.extend(calendars.into_iter().map(|calendar| Row {
+                item: Item::Calendar(CalendarKey::Remote {
+                    account_id: account.id,
+                    calendar_id: calendar.id.clone(),
+                }),
+                label: calendar.name.clone(),
+                indent: 1,
+                icon: Icon::Calendar {
+                    color: None,
+                    visible: !config.remote_calendar_hidden(account.id, &calendar.id),
+                },
+            }));
         }
-
-        rows.push(Row {
-            item: Item::ManageAccounts,
-            label: fl!("sidebar-manage-accounts"),
-            indent: 0,
-            icon: Icon::Accounts,
-        });
         rows
     }
 }
@@ -173,9 +141,6 @@ impl AppModel {
                 .into(),
                 Icon::Calendar { color, visible } => {
                     calendar_color_icon(color.as_deref().and_then(calendar_color), *visible)
-                }
-                Icon::Accounts => {
-                    widget::icon::from_name("preferences-system-and-accounts-symbolic").into()
                 }
             };
             self.nav
@@ -233,10 +198,6 @@ impl AppModel {
                         self.toast(fl!("calendar-visibility-error", error = error.to_string()))
                     }
                 }
-            }
-            Some(Item::ManageAccounts) => {
-                self.show_context_page(ContextPage::Settings);
-                Task::none()
             }
             None => Task::none(),
         }
@@ -297,15 +258,6 @@ impl AppModel {
     }
 }
 
-fn provider_label(provider: &str) -> String {
-    match provider {
-        "google" => "Google".into(),
-        "microsoft" => "Microsoft".into(),
-        accounts::models::CUSTOM_CALDAV_PROVIDER => fl!("sidebar-caldav"),
-        _ => provider.to_owned(),
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MenuAction {
     NewCalendar,
@@ -336,7 +288,7 @@ mod tests {
     use crate::features::accounts::dav::{Calendar, Snapshot};
 
     #[test]
-    fn groups_calendars_by_provider_and_keeps_visibility_per_account() {
+    fn lists_accounts_directly_and_keeps_visibility_per_account() {
         let account = |provider: &str| Account {
             id: Uuid::new_v4(),
             display_name: provider.into(),
@@ -384,20 +336,24 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(remote, [(caldav, true), (first, false), (second, true)]);
+        assert_eq!(remote, [(first, false), (second, true), (caldav, true)]);
+        assert_eq!(rows.len(), 7);
+        assert_eq!(rows[1].item, Item::Group(Group::Account(first)));
+        assert_eq!(rows[1].indent, 0);
+        assert_eq!(rows[2].indent, 1);
         assert!(!rows
             .iter()
             .any(|row| row.item == Item::Group(Group::Account(inactive))));
 
-        sidebar.collapsed.insert(Group::Provider("google".into()));
+        sidebar.collapsed.insert(Group::Account(first));
         let rows = sidebar.build_rows(&storage, &accounts, &active, &config);
-        let shown_accounts: Vec<_> = rows
-            .iter()
-            .filter_map(|row| match row.item {
-                Item::Group(Group::Account(id)) => Some(id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(shown_accounts, [caldav]);
+        assert!(!rows.iter().any(|row| matches!(
+            row.item,
+            Item::Calendar(CalendarKey::Remote { account_id, .. }) if account_id == first
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row.item,
+            Item::Calendar(CalendarKey::Remote { account_id, .. }) if account_id == second
+        )));
     }
 }

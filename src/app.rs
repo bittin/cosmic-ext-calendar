@@ -138,7 +138,7 @@ pub struct AppModel {
     location_lookup: Option<(uuid::Uuid, cosmic::iced::task::Handle)>,
     photon_endpoint_input: Option<String>,
     calendar_form: Option<CalendarForm>,
-    // Provider groups and the rows currently shown in the calendar sidebar.
+    // Account groups and the rows currently shown in the calendar sidebar.
     sidebar: sidebar::Sidebar,
     // Current text in the header search bar; non-empty replaces the main
     // view with search results.
