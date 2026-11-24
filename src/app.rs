@@ -26,7 +26,7 @@ use cosmic::iced::{Alignment, Length, Subscription, window};
 use cosmic::prelude::*;
 use cosmic::theme::spacing;
 use cosmic::widget::{color_picker::ColorPickerUpdate, segmented_button::SingleSelect};
-use cosmic::widget::{self, menu, nav_bar};
+use cosmic::widget::{self, about::About, menu, nav_bar};
 use cosmic::{cosmic_theme, theme};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -44,6 +44,31 @@ use crate::features::event::notifications::{NotificationMessage, CHECK_INTERVAL}
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
+
+fn about_info() -> About {
+    let links = vec![
+        (fl!("repository"), REPOSITORY.to_owned()),
+        (
+            fl!("about-releases"),
+            concat!(env!("CARGO_PKG_REPOSITORY"), "/releases").to_owned(),
+        ),
+        (
+            fl!("about-report-issue"),
+            concat!(env!("CARGO_PKG_REPOSITORY"), "/issues").to_owned(),
+        ),
+    ];
+
+    About::default()
+        .name(fl!("app-title"))
+        .comments(fl!("about-description"))
+        .author("Eduardo Flores")
+        .developers([("Eduardo Flores", "edfloreshz@gmail.com")])
+        .icon(widget::icon::from_svg_bytes(APP_ICON))
+        .version(env!("CARGO_PKG_VERSION"))
+        .license(env!("CARGO_PKG_LICENSE"))
+        .license_url("https://www.gnu.org/licenses/gpl-3.0.html")
+        .links(links)
+}
 
 #[derive(Default)]
 struct IcsImportState {
@@ -78,6 +103,7 @@ enum CalendarClipboard {
 pub struct AppModel {
     /// Application state which is managed by the COSMIC runtime.
     core: cosmic::Core,
+    about: About,
     /// Display a context drawer with the designated page if defined.
     context_page: ContextPage,
     sidebar_before_agenda: Option<bool>,
@@ -138,7 +164,6 @@ pub enum Message {
     MenuSurface(cosmic::surface::Action),
     Shortcut(shortcuts::Action),
     Quit,
-    OpenRepositoryUrl,
     ToggleContextPage(ContextPage),
     LaunchUrl(String),
     CloseToast(widget::ToastId),
@@ -213,6 +238,7 @@ impl cosmic::Application for AppModel {
         // Construct the app model with the runtime's core.
         let mut app = AppModel {
             core,
+            about: about_info(),
             context_page: ContextPage::default(),
             sidebar_before_agenda: None,
             window_width: 0.0,
@@ -580,8 +606,9 @@ impl cosmic::Application for AppModel {
                 Message::ToggleContextPage(ContextPage::Shortcuts),
             )
             .title(fl!("keyboard-shortcuts")),
-            ContextPage::About => context_drawer::context_drawer(
-                self.about(),
+            ContextPage::About => context_drawer::about(
+                &self.about,
+                |url| Message::LaunchUrl(url.to_owned()),
                 Message::ToggleContextPage(ContextPage::About),
             )
             .title(fl!("about")),
@@ -733,9 +760,6 @@ impl cosmic::Application for AppModel {
             Message::Notifications(message) => return self.update_notifications(message),
             Message::Accounts(action) => return self.update_accounts(action),
             Message::MenuSurface(action) => return cosmic::surface::surface_task(action),
-            Message::OpenRepositoryUrl => {
-                _ = open::that_detached(REPOSITORY);
-            }
             Message::ToggleContextPage(context_page) => {
                 if self.context_page == context_page && self.core.window.show_context {
                     if !self.close_day_agenda() {
@@ -1442,41 +1466,6 @@ impl AppModel {
             OffsetDateTime::now_utc(),
             self.calendar.display_timezone,
         );
-    }
-
-    /// The about page for this app.
-    pub fn about<'a>(&'a self) -> Element<'a, Message> {
-        let cosmic_theme::Spacing { space_xxs, .. } = theme::active().cosmic().spacing;
-
-        let icon = widget::svg(widget::svg::Handle::from_memory(APP_ICON));
-
-        let title = widget::text::title3(fl!("app-title"));
-
-        let hash = env!("VERGEN_GIT_SHA");
-        let short_hash: String = hash.chars().take(7).collect();
-        let date = env!("VERGEN_GIT_COMMIT_DATE");
-
-        let link = widget::button::link(REPOSITORY)
-            .on_press(Message::OpenRepositoryUrl)
-            .padding(0);
-
-        let version: Element<'a, Message> = if hash.is_empty() || hash == "VERGEN_IDEMPOTENT_OUTPUT" {
-            widget::text(env!("CARGO_PKG_VERSION")).into()
-        } else {
-            widget::button::link(fl!("git-description", hash = short_hash.as_str(), date = date))
-                .on_press(Message::LaunchUrl(format!("{REPOSITORY}/commits/{hash}")))
-                .padding(0)
-                .into()
-        };
-
-        widget::column(Vec::new())
-            .push(icon)
-            .push(title)
-            .push(link)
-            .push(version)
-            .align_x(Alignment::Center)
-            .spacing(space_xxs)
-            .into()
     }
 
     /// The event creation/editing form for the context drawer.

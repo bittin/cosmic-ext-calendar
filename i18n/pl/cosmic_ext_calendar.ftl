@@ -1,5 +1,9 @@
 app-title = Kalendarz
 about = O kalendarzu
+about-description = Planuj wydarzenia i organizuj swój harmonogram w środowisku COSMIC.
+repository = Repozytorium
+about-releases = Wydania
+about-report-issue = Zgłoś problem
 app-menu = Menu aplikacji
 page-id = Strona { $num }
 git-description = Git commit {$hash} z {$date}

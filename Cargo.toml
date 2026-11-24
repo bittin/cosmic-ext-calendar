@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "A calendar application for the COSMIC desktop"
-repository = "https://github.com/cosmic-utils/calendar"
+repository = "https://github.com/cosmic-utils/cosmic-ext-calendar"
 
 [build-dependencies]
 vergen = { version = "8", features = ["git", "gitcl"] }
@@ -42,6 +42,7 @@ features = ["fluent-system", "desktop-requester"]
 git = "https://github.com/pop-os/libcosmic.git"
 # See https://github.com/pop-os/libcosmic/blob/master/Cargo.toml for available features.
 features = [
+    "about",
     # Accessibility support
     "a11y",
     # Uses cosmic-settings-daemon to watch for config file changes
