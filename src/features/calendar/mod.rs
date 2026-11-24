@@ -518,6 +518,25 @@ impl LocalCalendar {
         self.selected_date.date() == self.current_date.date()
     }
 
+    pub(crate) fn selected_day_events(
+        &self,
+        storage: &LocalStorage,
+        active_accounts: &std::collections::BTreeSet<uuid::Uuid>,
+    ) -> Vec<EventSelection> {
+        let day = self.selected_date.date();
+        month::occurrences(
+            storage,
+            active_accounts,
+            day,
+            day,
+            self.display_timezone,
+            self.selected_event,
+        )
+        .iter()
+        .map(month::Occurrence::key)
+        .collect()
+    }
+
     pub fn select_slot(&mut self, slot: CalendarSlot) {
         self.set_date(self.selected_date.replace_date(slot.date()));
         self.selected_slot = Some(slot);

@@ -36,6 +36,7 @@ use time::OffsetDateTime;
 mod flags;
 pub use flags::*;
 mod settings;
+mod shortcuts;
 pub use settings::*;
 mod update;
 
@@ -135,6 +136,8 @@ pub struct AppModel {
 #[derive(Debug, Clone)]
 pub enum Message {
     MenuSurface(cosmic::surface::Action),
+    Shortcut(shortcuts::Action),
+    Quit,
     OpenRepositoryUrl,
     ToggleContextPage(ContextPage),
     LaunchUrl(String),
@@ -215,7 +218,7 @@ impl cosmic::Application for AppModel {
             window_width: 0.0,
             nav,
             tabs,
-            key_binds: HashMap::new(),
+            key_binds: shortcuts::menu_bindings(),
             // Optional configuration file for an application.
             config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
                 .map(|context| match Config::get_entry(&context) {
@@ -337,7 +340,10 @@ impl cosmic::Application for AppModel {
                     ),
                     menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
                     menu::Item::Divider,
+                    menu::Item::Button(fl!("keyboard-shortcuts"), None, MenuAction::Shortcuts),
                     menu::Item::Button(fl!("about"), None, MenuAction::About),
+                    menu::Item::Divider,
+                    menu::Item::Button(fl!("shortcut-quit"), None, MenuAction::Quit),
                 ],
             ),
         )])
@@ -357,6 +363,7 @@ impl cosmic::Application for AppModel {
             240.0
         };
         vec![widget::search_input(fl!("search"), &self.search_query)
+            .id(shortcuts::search_id())
             .on_input(|value| Message::Calendar(CalendarMessage::SearchChanged(value)))
             .on_clear(Message::Calendar(CalendarMessage::SearchChanged(
                 String::new(),
@@ -366,17 +373,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn header_end<'a>(&'a self) -> Vec<Element<'a, Self::Message>> {
-        let selected_slot = self.calendar.selected_slot.or_else(|| {
-            self.show_month()
-                .then(|| CalendarSlot::MonthDay(self.calendar.selected_date.date()))
-        });
-        let create_message = selected_slot.map_or(
-            Message::Event(EventMessage::AddEvent(self.calendar.current_date)),
-            |slot| self.create_event_at_slot(slot),
-        );
         let create_event = widget::button::icon(widget::icon::from_name("list-add-symbolic"))
             .name(fl!("create-event"))
-            .on_press(create_message);
+            .on_press(self.new_event_message());
 
         vec![
             widget::tooltip(
@@ -576,6 +575,11 @@ impl cosmic::Application for AppModel {
                 Message::ToggleContextPage(ContextPage::IcsImport),
             )
             .title(fl!("import-ics")),
+            ContextPage::Shortcuts => context_drawer::context_drawer(
+                shortcuts::view(),
+                Message::ToggleContextPage(ContextPage::Shortcuts),
+            )
+            .title(fl!("keyboard-shortcuts")),
             ContextPage::About => context_drawer::context_drawer(
                 self.about(),
                 Message::ToggleContextPage(ContextPage::About),
@@ -703,66 +707,12 @@ impl cosmic::Application for AppModel {
             .watch_config::<Config>(Self::APP_ID)
             .map(|update| Message::Settings(SettingsMessage::UpdateConfig(update.config)));
 
-        let month_shortcuts = if self.show_month() && self.editing_event.is_none() {
-            cosmic::iced::event::listen_with(|event, status, _| {
-                use cosmic::iced::{
-                    Event, event,
-                    keyboard::{self, key::Named},
-                };
-
-                let Event::Keyboard(keyboard::Event::KeyPressed {
-                    key,
-                    modifiers,
-                    repeat: false,
-                    ..
-                }) = event
-                else {
-                    return None;
-                };
-                if status != event::Status::Ignored || modifiers != keyboard::Modifiers::CTRL {
-                    return None;
-                }
-                match key.as_ref() {
-                    keyboard::Key::Named(Named::PageUp) => {
-                        Some(Message::Calendar(CalendarMessage::NavigatePreviousMonth))
-                    }
-                    keyboard::Key::Named(Named::PageDown) => {
-                        Some(Message::Calendar(CalendarMessage::NavigateNextMonth))
-                    }
-                    keyboard::Key::Named(Named::Home) => {
-                        Some(Message::Calendar(CalendarMessage::NavigateToday))
-                    }
-                    _ => None,
-                }
-            })
-        } else {
-            Subscription::none()
-        };
-        // Libcosmic forwards ignored Escape presses to on_escape. Handle ones
-        // captured by the editor's focused input through the same path.
-        let editor_escape = if self.editing_event.is_some() {
-            cosmic::iced::event::listen_with(|event, status, _| {
-                use cosmic::iced::{Event, event::Status, keyboard::{Event as KeyEvent, Key, key::Named}};
-
-                match (event, status) {
-                    (
-                        Event::Keyboard(KeyEvent::KeyPressed {
-                            key: Key::Named(Named::Escape),
-                            repeat: false,
-                            ..
-                        }),
-                        Status::Captured,
-                    ) => Some(Message::Event(EventMessage::EscapeEventEditor)),
-                    _ => None,
-                }
-            })
-        } else {
-            Subscription::none()
-        };
-        let accounts = accounts_feature::subscription::subscription(
-            self.watched_account_ids.clone(),
-        );
-        Subscription::batch([alerts_tick, config_updates, month_shortcuts, editor_escape, accounts])
+        let keyboard_shortcuts =
+            shortcuts::subscription(self.core.main_window_id(), self.shortcut_scope())
+                .map(Message::Shortcut);
+        let accounts =
+            accounts_feature::subscription::subscription(self.watched_account_ids.clone());
+        Subscription::batch([alerts_tick, config_updates, keyboard_shortcuts, accounts])
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -771,6 +721,8 @@ impl cosmic::Application for AppModel {
     /// on the application's async runtime.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
+            Message::Shortcut(action) => return self.update_shortcut(action),
+            Message::Quit => return cosmic::iced::exit(),
             Message::Calendar(message) => return self.update_calendar(message),
             Message::Event(message) => return self.update_event(message),
             Message::CalendarManagement(message) => {
@@ -863,18 +815,20 @@ impl cosmic::Application for AppModel {
         if self.calendar_popup.take().is_some() {
             return Task::none();
         }
-        if !self.core.window.show_context {
-            return Task::none();
+        if self.core.window.show_context {
+            return match self.context_page {
+                ContextPage::DayAgenda => {
+                    cosmic::task::message(Message::Calendar(CalendarMessage::CloseDayAgenda))
+                }
+                page => cosmic::task::message(Message::ToggleContextPage(page)),
+            };
         }
-        match self.context_page {
-            ContextPage::DayAgenda => {
-                cosmic::task::message(Message::Calendar(CalendarMessage::CloseDayAgenda))
-            }
-            ContextPage::Settings => {
-                cosmic::task::message(Message::ToggleContextPage(ContextPage::Settings))
-            }
-            _ => Task::none(),
+        if !self.search_query.is_empty() {
+            return cosmic::task::message(Message::Calendar(CalendarMessage::SearchChanged(
+                String::new(),
+            )));
         }
+        Task::none()
     }
 
     /// Called when a nav item is selected.
@@ -907,6 +861,17 @@ impl AppModel {
         self.toasts
             .push(widget::Toast::new(message))
             .map(cosmic::action::app)
+    }
+
+    fn new_event_message(&self) -> Message {
+        let selected_slot = self.calendar.selected_slot.or_else(|| {
+            self.show_month()
+                .then(|| CalendarSlot::MonthDay(self.calendar.selected_date.date()))
+        });
+        selected_slot.map_or(
+            Message::Event(EventMessage::AddEvent(self.calendar.current_date)),
+            |slot| self.create_event_at_slot(slot),
+        )
     }
 
     fn create_event_at_slot(&self, slot: CalendarSlot) -> Message {
@@ -1698,6 +1663,7 @@ pub enum ContextPage {
     DayAgenda,
     Settings,
     IcsImport,
+    Shortcuts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1705,6 +1671,8 @@ pub enum MenuAction {
     NewCalendar,
     About,
     Settings,
+    Shortcuts,
+    Quit,
     ImportIcs,
     ExportIcs,
     ArchivedCalendars,
@@ -1720,6 +1688,8 @@ impl menu::action::MenuAction for MenuAction {
             }
             MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
+            MenuAction::Shortcuts => Message::ToggleContextPage(ContextPage::Shortcuts),
+            MenuAction::Quit => Message::Quit,
             MenuAction::ImportIcs => Message::Ics(IcsMessage::ImportIcs),
             MenuAction::ExportIcs => Message::Ics(IcsMessage::ExportIcs),
             MenuAction::ArchivedCalendars => {
