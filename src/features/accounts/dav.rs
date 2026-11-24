@@ -628,6 +628,7 @@ mod tests {
             display_name: "Google".into(),
             email: Some("person+calendar@example.org".into()),
             provider: "google".into(),
+            server: None,
         };
         let credentials = CalendarCredentials::OAuth {
             uri: "https://apidata.googleusercontent.com/caldav/v2/".into(),
@@ -660,6 +661,7 @@ mod tests {
             display_name: "CalDAV".into(),
             email: None,
             provider: "caldav".into(),
+            server: None,
         };
         let response = |summary: &str| {
             format!(

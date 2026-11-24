@@ -255,3 +255,7 @@ shortcut-toggle-sidebar = Toggle calendars sidebar
 shortcut-month-agenda = Open selected day’s agenda in Month view
 shortcut-previous-event = Previous event on the selected day
 shortcut-next-event = Next event on the selected day
+
+local-calendars = Local calendars
+sidebar-caldav = CalDAV
+sidebar-manage-accounts = Manage online accounts

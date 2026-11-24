@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cosmic::cosmic_config::{self, cosmic_config_derive::CosmicConfigEntry, CosmicConfigEntry};
 use cosmic::theme;
@@ -39,4 +39,14 @@ pub struct Config {
     /// Accounts whose calendar data Calendar should ignore locally. The
     /// broker still owns whether the Calendar service is available at all.
     pub disabled_accounts: BTreeSet<Uuid>,
+    /// Remote calendars hidden in the sidebar, keyed by account and collection.
+    pub hidden_remote_calendars: BTreeMap<Uuid, BTreeSet<String>>,
+}
+
+impl Config {
+    pub(crate) fn remote_calendar_hidden(&self, account_id: Uuid, calendar_id: &str) -> bool {
+        self.hidden_remote_calendars
+            .get(&account_id)
+            .is_some_and(|calendars| calendars.contains(calendar_id))
+    }
 }

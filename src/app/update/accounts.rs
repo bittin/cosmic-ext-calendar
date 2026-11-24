@@ -98,6 +98,7 @@ impl AppModel {
                     id,
                     accounts_feature::SyncStatus::Finished(std::time::Instant::now(), error),
                 );
+                self.refresh_calendar_visibility();
             }
             AccountsAction::SetLocallyEnabled(id, enabled) => {
                 let mut disabled = self.config.disabled_accounts.clone();

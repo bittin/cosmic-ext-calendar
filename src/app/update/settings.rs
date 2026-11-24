@@ -22,10 +22,14 @@ impl AppModel {
                 }
                 let theme_changed = self.config.app_theme != config.app_theme;
                 let accounts_changed = self.config.disabled_accounts != config.disabled_accounts;
+                let visibility_changed =
+                    self.config.hidden_remote_calendars != config.hidden_remote_calendars;
                 self.config = config;
                 if accounts_changed {
                     self.refresh_active_accounts();
                     tasks.push(self.sync_active_accounts());
+                } else if visibility_changed {
+                    self.refresh_calendar_visibility();
                 }
                 self.refresh_display_timezone();
                 if theme_changed {

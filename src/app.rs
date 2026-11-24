@@ -4,7 +4,7 @@ use crate::features::accounts::{self as accounts_feature, AccountsAction};
 use crate::features::calendar::{
     CalendarAction, CalendarAnchor, CalendarMessage, CalendarSlot, EventSelection, LocalCalendar,
 };
-use crate::features::calendar_management::model::{calendar_color, CalendarKey, LocalCalendarMeta};
+use crate::features::calendar_management::model::{CalendarKey, LocalCalendarMeta};
 use crate::features::calendar_management::{
     state::CalendarForm, view as calendar_form, CalendarManagementMessage,
 };
@@ -37,6 +37,7 @@ mod flags;
 pub use flags::*;
 mod settings;
 mod shortcuts;
+mod sidebar;
 pub use settings::*;
 mod update;
 
@@ -137,10 +138,8 @@ pub struct AppModel {
     location_lookup: Option<(uuid::Uuid, cosmic::iced::task::Handle)>,
     photon_endpoint_input: Option<String>,
     calendar_form: Option<CalendarForm>,
-    // Nav bar entity ids for the "Calendars" header + per-calendar rows,
-    // tracked so they can be torn down and rebuilt on every CRUD change.
-    calendar_nav_ids: Vec<nav_bar::Id>,
-    calendars_collapsed: bool,
+    // Provider groups and the rows currently shown in the calendar sidebar.
+    sidebar: sidebar::Sidebar,
     // Current text in the header search bar; non-empty replaces the main
     // view with search results.
     search_query: String,
@@ -278,8 +277,7 @@ impl cosmic::Application for AppModel {
             location_lookup: None,
             photon_endpoint_input: None,
             calendar_form: None,
-            calendar_nav_ids: Vec::new(),
-            calendars_collapsed: false,
+            sidebar: sidebar::Sidebar::default(),
             search_query: String::new(),
             checking_alerts: false,
             keep_running: flags.keep_running,
@@ -321,8 +319,6 @@ impl cosmic::Application for AppModel {
         }
 
         app.refresh_calendar_nav();
-
-        app.core.nav_bar_set_toggled(false);
 
         if app.keep_running {
             tasks.push(app.open_main_window());
@@ -535,45 +531,8 @@ impl cosmic::Application for AppModel {
         self.sidebar_before_agenda.is_none().then_some(&self.nav)
     }
 
-    /// The nav bar's per-item right-click menu: "New calendar" on the
-    /// "Calendars" header row, "Rename"/"Delete" on each calendar row.
-    /// `nav_bar`'s context menu implementation asserts that this yields
-    /// exactly one entry (possibly empty) per nav item, in iteration order.
     fn nav_context_menu(&self) -> Option<Vec<menu::Tree<cosmic::Action<Self::Message>>>> {
-        let can_delete = !self.storage_read_only;
-        let header_id = self.calendar_nav_ids.first().copied();
-
-        Some(menu::nav_context(
-            &HashMap::new(),
-            self.nav
-                .iter()
-                .map(|id| {
-                    if let Some(calendar_id) = self.nav.data::<CalendarId>(id).copied() {
-                        let mut items = vec![menu::Item::Button(
-                            fl!("rename"),
-                            None,
-                            NavMenuAction::RenameCalendar(calendar_id),
-                        )];
-                        if can_delete {
-                            items.push(menu::Item::Button(
-                                fl!("delete-calendar"),
-                                None,
-                                NavMenuAction::DeleteCalendar(calendar_id),
-                            ));
-                        }
-                        items
-                    } else if Some(id) == header_id {
-                        vec![menu::Item::Button(
-                            fl!("new-calendar"),
-                            None,
-                            NavMenuAction::NewCalendar,
-                        )]
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect(),
-        ))
+        Some(self.sidebar_context_menu())
     }
 
     /// Display a context drawer if the context page is requested.
@@ -857,26 +816,7 @@ impl cosmic::Application for AppModel {
 
     /// Called when a nav item is selected.
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<cosmic::Action<Self::Message>> {
-        // Clicking a calendar entry toggles its visibility rather than
-        // navigating to a page.
-        if let Some(calendar_id) = self.nav.data::<CalendarId>(id).copied() {
-            let visible = self
-                .storage
-                .lock()
-                .unwrap()
-                .get_calendar(calendar_id)
-                .map(|meta| !meta.visible)
-                .unwrap_or(true);
-            return cosmic::task::message(Message::CalendarManagement(
-                CalendarManagementMessage::ToggleCalendarVisibility(calendar_id, visible),
-            ));
-        }
-
-        if self.calendar_nav_ids.first() == Some(&id) {
-            self.calendars_collapsed = !self.calendars_collapsed;
-            self.refresh_calendar_nav();
-        }
-        Task::none()
+        self.update_sidebar(id)
     }
 }
 
@@ -1367,14 +1307,20 @@ impl AppModel {
         !self.config.disabled_accounts.contains(&id)
     }
 
-    pub(crate) fn active_account_ids(&self) -> &BTreeSet<uuid::Uuid> {
-        &self.active_accounts
+    fn remote_calendar_is_visible(&self, account_id: uuid::Uuid, calendar_id: &str) -> bool {
+        self.active_accounts.contains(&account_id)
+            && !self.config.remote_calendar_hidden(account_id, calendar_id)
     }
 
-    fn event_is_visible(&self, event: &crate::features::event::model::Event) -> bool {
-        match event.calendar {
-            CalendarKey::Local(_) => true,
-            CalendarKey::Remote { account_id, .. } => self.active_accounts.contains(&account_id),
+    pub(crate) fn event_is_visible(&self, storage: &LocalStorage, event: &Event) -> bool {
+        match &event.calendar {
+            CalendarKey::Local(id) => storage
+                .get_calendar(*id)
+                .is_none_or(|calendar| calendar.visible),
+            CalendarKey::Remote {
+                account_id,
+                calendar_id,
+            } => self.remote_calendar_is_visible(*account_id, calendar_id),
         }
     }
 
@@ -1393,6 +1339,7 @@ impl AppModel {
             self.calendar_popup = None;
         }
         self.active_accounts = active_accounts;
+        self.refresh_calendar_visibility();
     }
 
     pub(crate) fn account_sync_status(&self, id: uuid::Uuid) -> Option<&accounts_feature::SyncStatus> {
@@ -1481,56 +1428,6 @@ impl AppModel {
         }
     }
 
-    /// Tears down and rebuilds the "Calendars" section of the nav bar from
-    /// current storage state. `segmented_button::Model` has no in-place
-    /// update API, so every calendar CRUD change calls this to resync.
-    pub fn refresh_calendar_nav(&mut self) {
-        for id in self.calendar_nav_ids.drain(..) {
-            self.nav.remove(id);
-        }
-
-        let calendars = {
-            let storage = self.storage.lock().unwrap();
-            let mut metas = storage.list_calendars();
-            metas.sort_by(|a, b| a.name.cmp(&b.name));
-            metas
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-
-        let mut new_ids = Vec::with_capacity(calendars.len() + 1);
-
-        self.nav
-            .insert()
-            .text(fl!("calendars"))
-            .icon(widget::icon::from_name(if self.calendars_collapsed {
-                "pan-end-symbolic"
-            } else {
-                "pan-down-symbolic"
-            }))
-            .with_id(|id| new_ids.push(id));
-
-        if self.calendars_collapsed {
-            self.calendar_nav_ids = new_ids;
-            return;
-        }
-
-        for calendar in calendars {
-            let color = calendar.color.as_deref().and_then(calendar_color);
-            let icon = calendar_form::calendar_color_icon(color, calendar.visible).icon().size(16);
-            self.nav
-                .insert()
-                .indent(1)
-                .text(calendar.name)
-                .icon(icon)
-                .data(calendar.id)
-                .with_id(|entity| new_ids.push(entity));
-        }
-
-        self.calendar_nav_ids = new_ids;
-    }
-
     fn archived_calendars_view(&self) -> Element<'_, Message> {
         let storage = self.storage.lock().unwrap();
         let mut calendars = storage.archived_calendars();
@@ -1565,7 +1462,7 @@ impl AppModel {
         let results: Vec<_> = storage
             .search(&self.search_query)
             .into_iter()
-            .filter(|event| self.event_is_visible(event))
+            .filter(|event| self.event_is_visible(&storage, event))
             .collect();
 
         if results.is_empty() {
@@ -1684,34 +1581,6 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::ArchivedCalendars => {
                 Message::ToggleContextPage(ContextPage::ArchivedCalendars)
             }
-        }
-    }
-}
-
-/// Actions offered by the nav bar's per-item context menu (right-click),
-/// covering calendar creation/rename/delete now that calendar management is
-/// merged into the nav bar instead of a separate list drawer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NavMenuAction {
-    NewCalendar,
-    RenameCalendar(CalendarId),
-    DeleteCalendar(CalendarId),
-}
-
-impl menu::action::MenuAction for NavMenuAction {
-    type Message = cosmic::Action<Message>;
-
-    fn message(&self) -> Self::Message {
-        match self {
-            NavMenuAction::NewCalendar => cosmic::Action::App(Message::CalendarManagement(
-                CalendarManagementMessage::OpenNewCalendarForm,
-            )),
-            NavMenuAction::RenameCalendar(id) => cosmic::Action::App(Message::CalendarManagement(
-                CalendarManagementMessage::StartEditCalendar(*id),
-            )),
-            NavMenuAction::DeleteCalendar(id) => cosmic::Action::App(Message::CalendarManagement(
-                CalendarManagementMessage::DeleteCalendar(*id),
-            )),
         }
     }
 }

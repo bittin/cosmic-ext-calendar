@@ -69,13 +69,12 @@ impl AppModel {
                 self.calendar_click = None;
                 self.event_notes = widget::text_editor::Content::with_text(&state.description);
                 self.location_lookup = None;
+                let storage = self.storage.lock().unwrap();
                 self.event_locations = LocationSuggestions::new(
-                    self.storage
-                        .lock()
-                        .unwrap()
+                    storage
                         .all_events()
                         .into_iter()
-                        .filter(|event| self.event_is_visible(event))
+                        .filter(|event| self.event_is_visible(&storage, event))
                         .collect::<Vec<_>>(),
                     &state.location,
                 );

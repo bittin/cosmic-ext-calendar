@@ -1,6 +1,4 @@
 use super::CalendarMessage;
-use std::collections::BTreeSet;
-
 use cosmic::{
     Element,
     iced::{Border, Color, Length, alignment::Vertical, widget::Id},
@@ -63,16 +61,16 @@ impl Occurrence {
 
 pub(super) fn occurrences(
     storage: &LocalStorage,
-    active_accounts: &BTreeSet<uuid::Uuid>,
+    app: &AppModel,
     first: Date,
     last: Date,
     zone: Option<chrono_tz::Tz>,
     selection: Option<EventSelection>,
 ) -> Vec<Occurrence> {
-    let events = storage.all_events().into_iter().filter(|event| match event.calendar {
-        CalendarKey::Local(_) => true,
-        CalendarKey::Remote { account_id, .. } => active_accounts.contains(&account_id),
-    });
+    let events = storage
+        .all_events()
+        .into_iter()
+        .filter(|event| app.event_is_visible(storage, event));
     let mut items = occurrences_with_calendars(
         events.map(|event| {
             let calendar = match event.calendar {
@@ -193,7 +191,7 @@ pub(super) fn month_view<'a>(
     let last = first + Duration::days((weeks * DAYS_PER_WEEK - 1) as i64);
     let items = occurrences(
         storage,
-        app.active_account_ids(),
+        app,
         first,
         last,
         calendar.display_timezone,
@@ -533,7 +531,7 @@ pub(super) fn agenda<'a>(
     selection: Option<EventSelection>,
     app: &'a AppModel,
 ) -> Element<'a, Message> {
-    let items = occurrences(storage, app.active_account_ids(), date, date, zone, selection);
+    let items = occurrences(storage, app, date, date, zone, selection);
     let mut content = widget::column(Vec::new())
         .spacing(spacing().space_xxs)
         .push(widget::text::heading(agenda_date(date)));

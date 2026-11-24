@@ -373,7 +373,7 @@ impl LocalCalendar {
         let last = first + Duration::days(6);
         let items = month::occurrences(
             storage,
-            app.active_account_ids(),
+            app,
             first,
             last,
             self.display_timezone,
@@ -423,7 +423,7 @@ impl LocalCalendar {
         let date = self.selected_date.date();
         let items = month::occurrences(
             storage,
-            app.active_account_ids(),
+            app,
             date,
             date,
             self.display_timezone,
@@ -521,12 +521,12 @@ impl LocalCalendar {
     pub(crate) fn selected_day_events(
         &self,
         storage: &LocalStorage,
-        active_accounts: &std::collections::BTreeSet<uuid::Uuid>,
+        app: &AppModel,
     ) -> Vec<EventSelection> {
         let day = self.selected_date.date();
         month::occurrences(
             storage,
-            active_accounts,
+            app,
             day,
             day,
             self.display_timezone,

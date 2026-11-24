@@ -483,7 +483,7 @@ impl AppModel {
                 }
                 let events = self
                     .calendar
-                    .selected_day_events(&self.storage.lock().unwrap(), &self.active_accounts);
+                    .selected_day_events(&self.storage.lock().unwrap(), self);
                 if let Some(first) = events.first().copied() {
                     let current = self
                         .calendar
@@ -523,7 +523,7 @@ impl AppModel {
                     let storage = self.storage.lock().unwrap();
                     let Some(event) = storage
                         .get_event(id)
-                        .filter(|event| self.event_is_visible(event))
+                        .filter(|event| self.event_is_visible(&storage, event))
                     else {
                         return Task::none();
                     };

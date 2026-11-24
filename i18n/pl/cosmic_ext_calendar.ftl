@@ -218,3 +218,7 @@ shortcut-toggle-sidebar = Przełącz panel kalendarzy
 shortcut-month-agenda = Otwórz agendę wybranego dnia w widoku miesiąca
 shortcut-previous-event = Poprzednie wydarzenie wybranego dnia
 shortcut-next-event = Następne wydarzenie wybranego dnia
+
+local-calendars = Kalendarze lokalne
+sidebar-caldav = CalDAV
+sidebar-manage-accounts = Zarządzaj kontami online

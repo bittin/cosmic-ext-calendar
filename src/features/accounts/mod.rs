@@ -18,22 +18,41 @@ pub struct Account {
     pub display_name: String,
     pub email: Option<String>,
     pub provider: String,
+    pub server: Option<String>,
 }
 
 impl Account {
     pub fn label(&self) -> String {
-        match self.email.as_deref() {
-            Some(email) if !email.is_empty() => format!("{} ({email})", self.display_name),
+        match self
+            .email
+            .as_deref()
+            .filter(|email| !email.is_empty())
+            .or(self.server.as_deref())
+        {
+            Some(identity) if identity != self.display_name => {
+                format!("{} ({identity})", self.display_name)
+            }
             _ => self.display_name.clone(),
         }
     }
 
     fn from_broker(account: &accounts::models::Account) -> Self {
+        let server = account
+            .caldav_url
+            .as_deref()
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .and_then(|url| {
+                url.host_str().map(|host| {
+                    url.port()
+                        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
+                })
+            });
         Self {
             id: account.id,
             display_name: account.display_name.clone(),
             email: account.email.clone(),
             provider: account.provider.clone(),
+            server,
         }
     }
 }

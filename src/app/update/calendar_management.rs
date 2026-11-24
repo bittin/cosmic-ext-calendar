@@ -130,7 +130,7 @@ impl AppModel {
                     match result {
                         Ok(()) => {
                             self.calendar_form = None;
-                            self.refresh_calendar_nav();
+                            self.refresh_calendar_visibility();
                         }
                         Err(err) => {
                             let notice = if editing {
@@ -175,7 +175,7 @@ impl AppModel {
                 ));
             }
             CalendarManagementMessage::CalendarVisibilityToggled(result) => match result {
-                Ok(()) => self.refresh_calendar_nav(),
+                Ok(()) => self.refresh_calendar_visibility(),
                 Err(err) => {
                     tasks.push(self.toast(fl!("calendar-visibility-error", error = err.as_str())))
                 }
@@ -239,7 +239,7 @@ impl AppModel {
                     Ok(()) => {
                         self.calendar.selected_event = None;
                         self.calendar_popup = None;
-                        self.refresh_calendar_nav();
+                        self.refresh_calendar_visibility();
                         if archived {
                             tasks.push(self.toast(fl!("calendar-archived")));
                         }
