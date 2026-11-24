@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::collections::BTreeSet;
+
 use cosmic::cosmic_config::{self, cosmic_config_derive::CosmicConfigEntry, CosmicConfigEntry};
 use cosmic::theme;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
 pub enum AppTheme {
@@ -33,4 +36,7 @@ pub struct Config {
     pub display_timezone: String,
     pub app_theme: AppTheme,
     pub photon_endpoint: String,
+    /// Accounts whose calendar data Calendar should ignore locally. The
+    /// broker still owns whether the Calendar service is available at all.
+    pub disabled_accounts: BTreeSet<Uuid>,
 }

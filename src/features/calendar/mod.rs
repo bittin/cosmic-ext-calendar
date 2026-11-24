@@ -360,6 +360,7 @@ impl LocalCalendar {
         let last = first + Duration::days(6);
         let items = month::occurrences(
             storage,
+            app.active_account_ids(),
             first,
             last,
             self.display_timezone,
@@ -409,6 +410,7 @@ impl LocalCalendar {
         let date = self.selected_date.date();
         let items = month::occurrences(
             storage,
+            app.active_account_ids(),
             date,
             date,
             self.display_timezone,

@@ -158,3 +158,21 @@ event-alert-first = Alert
 event-alert-numbered = { $number }. alert
 
 notification-untitled-event = Wydarzenie bez tytułu
+
+accounts = Konta
+manage-accounts = Zarządzaj kontami
+manage-accounts-description = Dodawaj i konfiguruj połączenia kalendarza w Kontach.
+open = Otwórz
+accounts-checking = Sprawdzanie kont…
+accounts-daemon-unavailable = Konta są niedostępne.
+no-accounts-connected = Nie podłączono żadnych kont kalendarza.
+accounts-app-launch-error = Nie udało się otworzyć Kont: {$error}
+account-save-error = Nie udało się zapisać ustawienia konta: {$error}
+accounts-error-unavailable = Konta są niedostępne.
+accounts-error-upgrade = Konta wymagają aktualizacji.
+accounts-error-disabled = To konto lub jego usługa Kalendarz jest wyłączona.
+accounts-error-needs-reauth = To konto wymaga ponownego połączenia.
+accounts-error-access-denied = Odmówiono dostępu do tego konta.
+accounts-error-consent-timeout = Żądanie Kont upłynęło.
+accounts-error-failed = Konta nie mogły wykonać żądania.
+accounts-error-unsupported = To konto nie jest obsługiwane.

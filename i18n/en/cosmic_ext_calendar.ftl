@@ -195,3 +195,21 @@ event-alert-numbered =
     }
 
 notification-untitled-event = Untitled event
+
+accounts = Accounts
+manage-accounts = Manage accounts
+manage-accounts-description = Add and configure calendar connections in Accounts.
+open = Open
+accounts-checking = Checking Accounts…
+accounts-daemon-unavailable = Accounts is unavailable.
+no-accounts-connected = No calendar accounts are connected.
+accounts-app-launch-error = Could not open Accounts: {$error}
+account-save-error = Could not save account preference: {$error}
+accounts-error-unavailable = Accounts is unavailable.
+accounts-error-upgrade = Accounts needs to be updated.
+accounts-error-disabled = This account or its Calendar service is disabled.
+accounts-error-needs-reauth = This account needs to be connected again.
+accounts-error-access-denied = Access to this account was denied.
+accounts-error-consent-timeout = The Accounts request timed out.
+accounts-error-failed = Accounts could not complete the request.
+accounts-error-unsupported = This account is not supported.

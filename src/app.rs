@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use crate::features::accounts::{self as accounts_feature, AccountsAction};
 use crate::features::calendar::{CalendarAnchor, CalendarSlot, EventSelection, LocalCalendar};
 use crate::features::calendar_management::model::{CalendarKey, LocalCalendarMeta, calendar_color};
 use crate::features::calendar_management::{state::CalendarForm, view as calendar_form};
@@ -22,7 +23,7 @@ use cosmic::theme::spacing;
 use cosmic::widget::{color_picker::ColorPickerUpdate, segmented_button::SingleSelect};
 use cosmic::widget::{self, menu, nav_bar};
 use cosmic::{cosmic_theme, theme};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Index;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -123,6 +124,13 @@ pub struct AppModel {
     search_query: String,
     checking_alerts: bool,
     keep_running: bool,
+    // Accounts-backed calendar sources. The broker owns account state; these
+    // fields are a local cache used by Settings and event filtering.
+    accounts: Vec<accounts_feature::Account>,
+    accounts_error: Option<accounts_feature::Error>,
+    accounts_checked: bool,
+    watched_account_ids: Vec<uuid::Uuid>,
+    active_accounts: BTreeSet<uuid::Uuid>,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -223,6 +231,7 @@ pub enum Message {
     MainWindowOpened,
     CheckAlerts,
     AlertsChecked,
+    Accounts(AccountsAction),
 }
 
 /// Create a COSMIC application from the app model
@@ -329,6 +338,11 @@ impl cosmic::Application for AppModel {
             search_query: String::new(),
             checking_alerts: false,
             keep_running: flags.keep_running,
+            accounts: Vec::new(),
+            accounts_error: None,
+            accounts_checked: false,
+            watched_account_ids: Vec::new(),
+            active_accounts: BTreeSet::new(),
         };
 
         let mut tasks = Vec::new();
@@ -368,6 +382,9 @@ impl cosmic::Application for AppModel {
             tasks.push(app.update_title());
         }
         tasks.push(cosmic::task::message(Message::CheckAlerts));
+        tasks.push(cosmic::task::message(Message::Accounts(
+            AccountsAction::Discover,
+        )));
         tasks.push(cosmic::command::set_theme(app.config.app_theme.theme()));
 
         app.refresh_display_timezone();
@@ -794,7 +811,10 @@ impl cosmic::Application for AppModel {
         } else {
             Subscription::none()
         };
-        Subscription::batch([alerts_tick, config_updates, month_shortcuts, editor_escape])
+        let accounts = accounts_feature::subscription::subscription(
+            self.watched_account_ids.clone(),
+        );
+        Subscription::batch([alerts_tick, config_updates, month_shortcuts, editor_escape, accounts])
     }
 
     /// Handles messages emitted by the application and its widgets.
@@ -935,7 +955,11 @@ impl cosmic::Application for AppModel {
                     self.clear_online_locations();
                 }
                 let theme_changed = self.config.app_theme != config.app_theme;
+                let accounts_changed = self.config.disabled_accounts != config.disabled_accounts;
                 self.config = config;
+                if accounts_changed {
+                    self.refresh_active_accounts();
+                }
                 self.refresh_display_timezone();
                 if theme_changed {
                     tasks.push(cosmic::command::set_theme(self.config.app_theme.theme()));
@@ -1048,7 +1072,9 @@ impl cosmic::Application for AppModel {
                 self.event_notes = widget::text_editor::Content::with_text(&state.description);
                 self.location_lookup = None;
                 self.event_locations = LocationSuggestions::new(
-                    self.storage.lock().unwrap().all_events(),
+                    self.storage.lock().unwrap().all_events().into_iter()
+                        .filter(|event| self.event_is_visible(event))
+                        .collect::<Vec<_>>(),
                     &state.location,
                 );
                 if state.editing_title {
@@ -1883,6 +1909,61 @@ impl cosmic::Application for AppModel {
                     tracing::error!("failed to navigate to previous year: {err}");
                 }
             }
+            Message::Accounts(action) => match action {
+                AccountsAction::Discover => {
+                    self.accounts_checked = false;
+                    self.accounts_error = None;
+                    return Task::perform(accounts_feature::discover(), |result| {
+                        cosmic::action::app(Message::Accounts(AccountsAction::Discovered(result)))
+                    });
+                }
+                AccountsAction::Discovered(result) => {
+                    self.accounts_checked = true;
+                    match result {
+                        Ok(discovery) => {
+                            self.accounts = discovery.accounts;
+                            self.watched_account_ids = discovery.watched_ids;
+                            self.accounts_error = None;
+                        }
+                        Err(error) => {
+                            self.accounts.clear();
+                            self.accounts_error = Some(error);
+                        }
+                    }
+                    self.refresh_active_accounts();
+                    return Task::none();
+                }
+                AccountsAction::Changed => {
+                    return cosmic::task::message(Message::Accounts(AccountsAction::Discover));
+                }
+                AccountsAction::OpenAccountsApp => {
+                    if let Err(err) = accounts::ui::open_add_account() {
+                        tasks.push(self.toast(fl!("accounts-app-launch-error", error = err.to_string())));
+                    }
+                }
+                AccountsAction::SetLocallyEnabled(id, enabled) => {
+                    let mut disabled = self.config.disabled_accounts.clone();
+                    if enabled {
+                        disabled.remove(&id);
+                    } else {
+                        disabled.insert(id);
+                    }
+                    if disabled != self.config.disabled_accounts {
+                        let mut config = self.config.clone();
+                        match cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
+                            .and_then(|context| config.set_disabled_accounts(&context, disabled))
+                        {
+                            Ok(_) => {
+                                self.config = config;
+                                self.refresh_active_accounts();
+                            }
+                            Err(err) => tasks.push(
+                                self.toast(fl!("account-save-error", error = err.to_string())),
+                            ),
+                        }
+                    }
+                }
+            },
         }
         self.update_drawer_layout();
         Task::batch(tasks)
@@ -2390,7 +2471,44 @@ impl AppModel {
                         .into()
                 },
             ]).spacing(spacing().space_xs));
-        widget::settings::view_column(vec![appearance.into(), section.into(), location_settings.into()]).into()
+        let accounts_section = accounts_feature::view::settings_view(self);
+        widget::settings::view_column(vec![accounts_section, appearance.into(), section.into(), location_settings.into()]).into()
+    }
+
+    pub(crate) fn accounts(&self) -> &[accounts_feature::Account] {
+        &self.accounts
+    }
+
+    pub(crate) fn accounts_checked(&self) -> bool {
+        self.accounts_checked
+    }
+
+    pub(crate) fn accounts_error(&self) -> Option<accounts_feature::Error> {
+        self.accounts_error
+    }
+
+    pub(crate) fn account_locally_enabled(&self, id: uuid::Uuid) -> bool {
+        !self.config.disabled_accounts.contains(&id)
+    }
+
+    pub(crate) fn active_account_ids(&self) -> &BTreeSet<uuid::Uuid> {
+        &self.active_accounts
+    }
+
+    fn event_is_visible(&self, event: &crate::features::event::model::Event) -> bool {
+        match event.calendar {
+            CalendarKey::Local(_) => true,
+            CalendarKey::Remote { account_id, .. } => self.active_accounts.contains(&account_id),
+        }
+    }
+
+    fn refresh_active_accounts(&mut self) {
+        self.active_accounts = self
+            .accounts
+            .iter()
+            .map(|account| account.id)
+            .filter(|id| self.account_locally_enabled(*id))
+            .collect();
     }
 
     fn photon_endpoint_input(&self) -> &str {
@@ -2549,7 +2667,11 @@ impl AppModel {
     /// the month/week/day grids while a search is active.
     fn search_results_view<'a>(&'a self) -> Element<'a, Message> {
         let storage = self.storage.lock().unwrap();
-        let results = storage.search(&self.search_query);
+        let results: Vec<_> = storage
+            .search(&self.search_query)
+            .into_iter()
+            .filter(|event| self.event_is_visible(event))
+            .collect();
 
         if results.is_empty() {
             return widget::text::body(fl!("no-results"))
