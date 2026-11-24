@@ -33,9 +33,8 @@ enum Item {
 
 #[derive(PartialEq, Eq)]
 enum Icon {
-    Group {
-        collapsed: bool,
-    },
+    LocalCalendars,
+    Account,
     Calendar {
         color: Option<String>,
         visible: bool,
@@ -59,11 +58,15 @@ pub(super) struct Sidebar {
 impl Sidebar {
     fn group(&self, group: Group, label: String, indent: u16, rows: &mut Vec<Row>) -> bool {
         let collapsed = self.collapsed.contains(&group);
+        let icon = match group {
+            Group::Local => Icon::LocalCalendars,
+            Group::Account(_) => Icon::Account,
+        };
         rows.push(Row {
             item: Item::Group(group),
             label,
             indent,
-            icon: Icon::Group { collapsed },
+            icon,
         });
         !collapsed
     }
@@ -144,12 +147,10 @@ impl AppModel {
         }
         for row in &rows {
             let icon = match &row.icon {
-                Icon::Group { collapsed } => widget::icon::from_name(if *collapsed {
-                    "pan-end-symbolic"
-                } else {
-                    "pan-down-symbolic"
-                })
-                .into(),
+                Icon::LocalCalendars => {
+                    widget::icon::from_name("x-office-calendar-symbolic").into()
+                }
+                Icon::Account => widget::icon::from_name("user-info-symbolic").into(),
                 Icon::Calendar { color, visible } => {
                     calendar_color_icon(color.as_deref().and_then(calendar_color), *visible)
                 }
@@ -351,6 +352,8 @@ mod tests {
         google.sort_by_key(|(id, _)| *id);
         assert_eq!(remote, [(caldav, true), google[0], google[1]]);
         assert_eq!(rows.len(), 7);
+        assert!(matches!(rows[0].icon, Icon::LocalCalendars));
+        assert!(matches!(rows[1].icon, Icon::Account));
         assert_eq!(rows[1].item, Item::Group(Group::Account(caldav)));
         assert_eq!(rows[1].label, "dav.example.test");
         assert_eq!(rows[3].label, "person@example.test");
