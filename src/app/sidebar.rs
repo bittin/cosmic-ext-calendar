@@ -3,9 +3,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
+use cosmic::iced::Length;
 use cosmic::prelude::*;
 use cosmic::widget::{self, menu, nav_bar};
-use cosmic::Application;
+use cosmic::{theme, Application, Element};
 use uuid::Uuid;
 
 use super::{AppModel, ContextPage, Message};
@@ -49,6 +50,7 @@ struct Row {
     indent: u16,
     icon: Icon,
     refresh: bool,
+    syncing: bool,
 }
 
 #[derive(Default)]
@@ -86,6 +88,7 @@ impl Sidebar {
             indent: 0,
             icon,
             refresh,
+            syncing: matches!(status, Some(SyncStatus::Running { .. })),
         });
         !collapsed && !failed
     }
@@ -107,6 +110,7 @@ impl Sidebar {
                 label: calendar.name.clone(),
                 indent: 1,
                 refresh: false,
+                syncing: false,
                 icon: Icon::Calendar {
                     color: calendar.color.clone(),
                     visible: calendar.visible,
@@ -144,6 +148,7 @@ impl Sidebar {
                 label: calendar.name.clone(),
                 indent: 1,
                 refresh: false,
+                syncing: false,
                 icon: Icon::Calendar {
                     color: None,
                     visible: !config.remote_calendar_hidden(account_id, &calendar.id),
@@ -172,11 +177,21 @@ impl Sidebar {
                     calendar_color_icon(color.as_deref().and_then(calendar_color), *visible)
                 }
             };
+            let icon = icon.icon().size(16);
+            // Keep the native icon slot so labels stay in place while the
+            // spinner is drawn above it.
+            let icon = if row.syncing {
+                widget::icon::from_raster_pixels(1, 1, &[0u8; 4][..])
+                    .icon()
+                    .size(16)
+            } else {
+                icon
+            };
             let id = nav
                 .insert()
                 .indent(row.indent)
                 .text(row.label.clone())
-                .icon(icon.icon().size(16))
+                .icon(icon)
                 .data(row.item.clone())
                 .id();
             // The nav widget's trailing action slot uses the "closable"
@@ -188,6 +203,62 @@ impl Sidebar {
 }
 
 impl AppModel {
+    pub(super) fn sidebar_view(&self) -> Element<'_, cosmic::Action<Message>> {
+        const ROW_HEIGHT: u16 = 32;
+        let spacing = theme::spacing();
+        let row_spacing = spacing.space_xxs;
+        let left_padding = spacing.space_s;
+        let nav = widget::segmented_button::vertical(&self.nav)
+            .on_activate(|id| cosmic::Action::Cosmic(cosmic::app::Action::NavBar(id)))
+            .on_context(|id| cosmic::Action::Cosmic(cosmic::app::Action::NavBarContext(id)))
+            .context_menu(Some(self.sidebar_context_menu()))
+            .close_icon(
+                widget::icon::from_name("view-refresh-symbolic")
+                    .size(16)
+                    .icon(),
+            )
+            .on_close(|id| cosmic::Action::App(Message::RefreshSidebarAccount(id)))
+            .window_id_maybe(self.core.main_window_id())
+            .on_surface_action(|action| cosmic::Action::App(Message::MenuSurface(action)))
+            .button_height(ROW_HEIGHT)
+            .button_padding([left_padding, row_spacing, left_padding, row_spacing])
+            .button_spacing(row_spacing)
+            .spacing(row_spacing)
+            .style(theme::SegmentedButton::NavBar);
+
+        // Native navigation rows keep their layout, focus and context menus.
+        // Both layers scroll together so spinners stay on their account rows.
+        let mut indicators =
+            widget::column::with_capacity(self.sidebar.rows.len()).spacing(row_spacing);
+        let height = Length::Fixed(f32::from(ROW_HEIGHT));
+        for row in &self.sidebar.rows {
+            let indicator: Element<'_, cosmic::Action<Message>> = if row.syncing {
+                widget::container(widget::indeterminate_circular().size(16.0))
+                    .padding([0, 0, 0, left_padding])
+                    .center_y(height)
+                    .into()
+            } else {
+                widget::space::vertical().height(height).into()
+            };
+            indicators = indicators.push(indicator);
+        }
+
+        let content = cosmic::iced::widget::stack(vec![nav.into(), indicators.into()]);
+        let nav = widget::container(
+            widget::scrollable(widget::container(content).padding(row_spacing))
+                .class(cosmic::style::iced::Scrollable::Minimal)
+                .height(Length::Fill),
+        )
+        .width(Length::Shrink)
+        .height(Length::Fill)
+        .class(theme::Container::custom(widget::nav_bar::nav_bar_style));
+        if self.core.is_condensed() {
+            nav.into()
+        } else {
+            nav.max_width(280).into()
+        }
+    }
+
     pub(super) fn refresh_calendar_nav(&mut self) {
         let rows = self.sidebar.build_rows(
             &self.storage.lock().unwrap(),
@@ -472,6 +543,7 @@ mod tests {
             );
             assert_eq!(rows.len(), 2);
             assert!(matches!(rows[1].icon, Icon::AccountWarning));
+            assert_eq!(rows[1].syncing, !refresh);
             sidebar.update_nav(&mut nav, rows);
             let account = nav.iter().nth(1).unwrap();
             assert!(nav.is_enabled(account));

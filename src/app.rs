@@ -536,25 +536,8 @@ impl cosmic::Application for AppModel {
         if !self.core.nav_bar_active() {
             return None;
         }
-        let nav = widget::nav_bar(self.nav_model()?, |id| {
-            cosmic::Action::Cosmic(cosmic::app::Action::NavBar(id))
-        })
-        .on_context(|id| cosmic::Action::Cosmic(cosmic::app::Action::NavBarContext(id)))
-        .context_menu(Some(self.sidebar_context_menu()))
-        .close_icon(widget::icon::from_name("view-refresh-symbolic").size(16).icon())
-        .on_close(|id| cosmic::Action::App(Message::RefreshSidebarAccount(id)))
-        .window_id_maybe(self.core.main_window_id())
-        .on_surface_action(|action| cosmic::Action::App(Message::MenuSurface(action)))
-        .into_container()
-        .width(Length::Shrink)
-        .height(Length::Fill);
-
-        let nav = if self.core.is_condensed() {
-            nav
-        } else {
-            nav.max_width(280)
-        };
-        Some(nav.into())
+        self.nav_model()?;
+        Some(self.sidebar_view())
     }
 
     /// Display a context drawer if the context page is requested.
