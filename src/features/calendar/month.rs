@@ -1,3 +1,4 @@
+use super::CalendarMessage;
 use cosmic::{
     Element,
     iced::{Border, Color, Length, alignment::Vertical, widget::Id},
@@ -30,6 +31,7 @@ const WEEKDAY_ROW_HEIGHT: f32 = 28.0;
 pub(super) struct Occurrence {
     id: EventId,
     pub(super) selected: bool,
+    pub(super) editable: bool,
     pub(super) display_start: OffsetDateTime,
     pub(super) display_end: OffsetDateTime,
     pub(super) display_end_exclusive: OffsetDateTime,
@@ -53,19 +55,24 @@ impl Occurrence {
     }
 
     pub(super) fn open(&self, anchor: CalendarAnchor) -> Message {
-        Message::CalendarEventClicked(self.key(), anchor)
+        Message::Calendar(CalendarMessage::CalendarEventClicked(self.key(), anchor))
     }
 }
 
 pub(super) fn occurrences(
     storage: &LocalStorage,
+    app: &AppModel,
     first: Date,
     last: Date,
     zone: Option<chrono_tz::Tz>,
     selection: Option<EventSelection>,
 ) -> Vec<Occurrence> {
+    let events = storage
+        .all_events()
+        .into_iter()
+        .filter(|event| app.event_is_visible(storage, event));
     let mut items = occurrences_with_calendars(
-        storage.all_events().into_iter().map(|event| {
+        events.map(|event| {
             let calendar = match event.calendar {
                 CalendarKey::Local(id) => storage.get_calendar(id),
                 CalendarKey::Remote { .. } => None,
@@ -78,6 +85,11 @@ pub(super) fn occurrences(
     );
     for item in &mut items {
         item.selected = Some(item.key()) == selection;
+        if let Some(Event { calendar: CalendarKey::Remote { account_id, calendar_id }, .. }) = storage.get_event(item.id) {
+            item.calendar = storage.remote_calendars(*account_id).iter()
+                .find(|calendar| calendar.id == *calendar_id)
+                .map(|calendar| calendar.name.clone());
+        }
     }
     items
 }
@@ -101,8 +113,6 @@ fn occurrences_with_calendars<'a>(
             EventTime::Timed { start, end } => (end - start, false),
         };
         let duration = duration.max(Duration::ZERO);
-        // Look back by the event duration to include occurrences already in progress.
-        // A UTC day of padding covers local offsets and the recurrence query boundaries.
         let lower = utc_midnight(first)
             .saturating_sub(duration)
             .saturating_sub(Duration::days(1));
@@ -131,6 +141,7 @@ fn occurrences_with_calendars<'a>(
             items.push(Occurrence {
                 id: event.id,
                 selected: false,
+                editable: matches!(event.calendar, CalendarKey::Local(_)),
                 start,
                 display_start,
                 display_end,
@@ -178,6 +189,7 @@ pub(super) fn month_view<'a>(
     let last = first + Duration::days((weeks * DAYS_PER_WEEK - 1) as i64);
     let items = occurrences(
         storage,
+        app,
         first,
         last,
         calendar.display_timezone,
@@ -277,7 +289,6 @@ fn week_view<'a>(
     }
 
     if !compact {
-        // Place bands before single-day rows to keep each span in one lane.
         for event in week_items
             .iter()
             .copied()
@@ -402,7 +413,7 @@ fn week_view<'a>(
                 .height(EVENT_HEIGHT)
                 .padding([0, 4])
                 .class(cosmic::style::Button::Text)
-                .on_press(Message::ShowDayAgenda(date))
+                .on_press(Message::Calendar(CalendarMessage::ShowDayAgenda(date)))
                 .into()
         } else {
             widget::space::horizontal().width(Length::Fill).into()
@@ -517,7 +528,7 @@ pub(super) fn agenda<'a>(
     selection: Option<EventSelection>,
     app: &'a AppModel,
 ) -> Element<'a, Message> {
-    let items = occurrences(storage, date, date, zone, selection);
+    let items = occurrences(storage, app, date, date, zone, selection);
     let mut content = widget::column(Vec::new())
         .spacing(spacing().space_xxs)
         .push(widget::text::heading(agenda_date(date)));

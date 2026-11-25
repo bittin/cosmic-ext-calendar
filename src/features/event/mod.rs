@@ -1,3 +1,6 @@
+mod message;
+pub use message::EventMessage;
+
 pub mod location;
 pub mod model;
 mod occurrences;

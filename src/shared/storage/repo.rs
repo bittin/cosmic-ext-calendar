@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use tracing::warn;
+use uuid::Uuid;
 
 use super::{atomic, index::EventIndex, migration, paths};
+use crate::features::accounts::{Calendar, Snapshot};
 use crate::features::calendar_management::model::{
     CalendarKey, LocalCalendarMeta, CURRENT_CALENDAR_SCHEMA_VERSION,
 };
@@ -22,6 +24,7 @@ pub struct LocalStorage {
     event_files: HashMap<EventId, PathBuf>,
     duplicate_files: HashMap<EventId, Vec<PathBuf>>,
     calendars: HashMap<CalendarId, LocalCalendarMeta>,
+    remote_calendars: HashMap<Uuid, Vec<Calendar>>,
 }
 
 impl LocalStorage {
@@ -33,6 +36,7 @@ impl LocalStorage {
             event_files: HashMap::new(),
             duplicate_files: HashMap::new(),
             calendars: HashMap::new(),
+            remote_calendars: HashMap::new(),
         }
     }
 
@@ -106,6 +110,7 @@ impl LocalStorage {
             event_files,
             duplicate_files,
             calendars,
+            remote_calendars: HashMap::new(),
         };
         let splits: Vec<_> = storage
             .index
@@ -125,8 +130,6 @@ impl LocalStorage {
         }
         Ok(storage)
     }
-
-    // -- Calendars --------------------------------------------------------
 
     pub fn has_calendars(&self) -> bool {
         !self.calendars.is_empty()
@@ -190,7 +193,60 @@ impl LocalStorage {
         }
     }
 
-    // -- Events -------------------------------------------------------------
+    pub fn replace_remote_snapshot(&mut self, account_id: Uuid, snapshot: Snapshot) {
+        self.clear_remote_snapshot(account_id);
+        let overrides: Vec<_> = snapshot
+            .events
+            .iter()
+            .filter_map(|event| Some((event.series_id?, event.recurrence_id?)))
+            .collect();
+        for event in snapshot.events {
+            self.index.upsert(event);
+        }
+        for (series, occurrence) in overrides {
+            self.suppress_occurrence(series, occurrence);
+        }
+        self.remote_calendars.insert(account_id, snapshot.calendars);
+    }
+
+    pub fn clear_remote_snapshot(&mut self, account_id: Uuid) {
+        self.remote_calendars.remove(&account_id);
+        let ids: Vec<_> = self.index.all_records().filter_map(|event| {
+            matches!(event.calendar, CalendarKey::Remote { account_id: id, .. } if id == account_id)
+                .then_some(event.id)
+        }).collect();
+        for id in ids {
+            self.index.remove(id);
+        }
+    }
+
+    pub fn remote_calendars(&self, account_id: Uuid) -> &[Calendar] {
+        self.remote_calendars
+            .get(&account_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub fn remote_sync_seed(&self, account_id: Uuid) -> Snapshot {
+        let calendars: Vec<_> = self
+            .remote_calendars(account_id)
+            .iter()
+            .filter(|calendar| calendar.sync_token.is_some())
+            .cloned()
+            .collect();
+        let ids: std::collections::HashSet<_> =
+            calendars.iter().map(|calendar| &calendar.id).collect();
+        let events = self
+            .index
+            .all_records()
+            .filter(|event| {
+                matches!(&event.calendar, CalendarKey::Remote { account_id: id, calendar_id }
+                if *id == account_id && ids.contains(calendar_id))
+            })
+            .cloned()
+            .collect();
+        Snapshot { calendars, events }
+    }
 
     pub fn get_event(&self, id: EventId) -> Option<&Event> {
         self.index
@@ -221,7 +277,9 @@ impl LocalStorage {
                         .recurrence_cutoff()
                         .is_some_and(|end| end <= event.first_possible_occurrence())
             }))
-            .filter(|event| self.event_is_active(event))
+            .filter(|event| {
+                matches!(event.calendar, CalendarKey::Local(_)) && self.event_is_active(event)
+            })
     }
 
     pub fn search(&self, query: &str) -> Vec<&Event> {
@@ -234,6 +292,14 @@ impl LocalStorage {
 
     pub fn create_event(&mut self, event: Event) -> Result<()> {
         self.ensure_writable()?;
+        if matches!(event.calendar, CalendarKey::Remote { .. })
+            || self
+                .index
+                .get(event.id)
+                .is_some_and(|existing| matches!(existing.calendar, CalendarKey::Remote { .. }))
+        {
+            return Err(crate::Error::Storage("remote events are read-only".into()));
+        }
         if self
             .index
             .get(event.id)
@@ -253,9 +319,6 @@ impl LocalStorage {
                     "destination calendar no longer exists".into(),
                 ));
             }
-            // Keep the existing file location when moving an event. The
-            // calendar in the payload owns it, and one atomic write changes
-            // that ownership without leaving a second copy on disk.
             let path = self
                 .event_files
                 .get(&event.id)
@@ -305,8 +368,11 @@ impl LocalStorage {
 
     pub fn delete_event(&mut self, id: EventId) -> Result<()> {
         self.ensure_writable()?;
-        if self.get_event(id).is_none() {
+        let Some(event) = self.get_event(id) else {
             return Err(crate::Error::Storage("active event not found".into()));
+        };
+        if matches!(event.calendar, CalendarKey::Remote { .. }) {
+            return Err(crate::Error::Storage("remote events are read-only".into()));
         }
         let mut successors = std::collections::HashSet::from([id]);
         loop {
@@ -377,8 +443,6 @@ impl LocalStorage {
             if owner == id {
                 self.remove_event_file(replacement.id)?;
             } else {
-                // A later split is an independent series. Keep the edited
-                // occurrence attached to it if the predecessor is removed.
                 replacement.series_id = Some(owner);
                 replacement.recurrence_id = Some(slot);
                 replacement.ics_uid = self
@@ -392,8 +456,6 @@ impl LocalStorage {
     }
 
     fn remove_event_file(&mut self, id: EventId) -> Result<()> {
-        // Remove older copies first so a failed deletion cannot make one
-        // reappear as the current event on the next startup.
         for path in self
             .duplicate_files
             .get(&id)

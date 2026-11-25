@@ -20,6 +20,33 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 - `just check` runs clippy on the project to check for linter warnings
 - `just check-json` can be used by IDEs that support LSP
 
+## Online calendars
+
+Calendar owns its account data and credentials through the embedded `accounts` library.
+Open **Settings → Accounts** to sign in, reconnect, remove, or pause an account. No
+separate Accounts installation or broker is required. Enabled accounts refresh
+automatically; use the refresh button beside an account in the sidebar to retry
+immediately.
+
+Calendar ships with Google and Microsoft desktop OAuth registrations. To use a custom
+registration, set `ACCOUNTS_GOOGLE_CALENDAR_CLIENT_ID` or
+`ACCOUNTS_MICROSOFT_CALENDAR_CLIENT_ID` before launching Calendar. If the custom
+registration requires a secret, also set the matching `_CLIENT_SECRET`. The default
+loopback redirect is `http://127.0.0.1/callback`.
+
+Microsoft accounts use Microsoft Graph and the delegated `Calendars.Read` permission.
+If this permission was added after sign-in, use **Reconnect** in Calendar. Calendar
+shows Microsoft event occurrences from roughly one year before today through one year
+after today.
+
+Sign-in fails entirely if secure storage is unavailable or locked; credentials are
+never stored in plaintext or kept only in memory. Online calendars are read-only.
+Calendar keeps the current sync results in memory. The separate notification worker
+delivers alerts for local calendars, and the running Calendar app also checks alerts
+for synced events.
+
+The Flatpak uses the Secret portal for encrypted, app-private credential storage.
+
 ## Translators
 
 [Fluent][fluent] is used for localization of the software. Fluent's translation files are found in the [i18n directory](./i18n). New translations may copy the [English (en) localization](./i18n/en) of the project, rename `en` to the desired [ISO 639-1 language code][iso-codes], and then translations can be provided for each [message identifier][fluent-guide]. If no translation is necessary, the message may be omitted.

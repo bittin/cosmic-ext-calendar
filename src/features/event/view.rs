@@ -1,3 +1,4 @@
+use super::EventMessage;
 use std::borrow::Cow;
 
 use cosmic::{Element, iced::Length, theme::spacing, widget};
@@ -31,7 +32,7 @@ fn date_control(
         year = date.year().to_string()
     ))
     .leading_icon(widget::icon::from_name("office-calendar-symbolic"))
-    .on_press(Message::OpenEventDatePicker(field));
+    .on_press(Message::Event(EventMessage::OpenEventDatePicker(field)));
     let Some((_, model)) = state
         .date_picker
         .as_ref()
@@ -42,15 +43,15 @@ fn date_control(
 
     let picker = widget::calendar(
         model,
-        Message::SelectEventDate,
-        || Message::BrowseEventDatePicker(-1),
-        || Message::BrowseEventDatePicker(1),
+        |value| Message::Event(EventMessage::SelectEventDate(value)),
+        || Message::Event(EventMessage::BrowseEventDatePicker(-1)),
+        || Message::Event(EventMessage::BrowseEventDatePicker(1)),
         jiff::civil::Weekday::Monday,
     );
     widget::popover::popover(button)
         .position(widget::popover::Position::Bottom)
         .popup(widget::container(picker).class(cosmic::theme::Container::Dialog(false)))
-        .on_close(Message::CloseEventDatePicker)
+        .on_close(Message::Event(EventMessage::CloseEventDatePicker))
         .into()
 }
 
@@ -77,19 +78,19 @@ fn schedule_row(state: &EventEditorState, is_start: bool) -> Element<'_, Message
     if !state.all_day {
         let value = input.clone().unwrap_or_else(|| clock_label(endpoint));
         let combo_box = widget::combo_box(presets, &value, Some(&value), move |value| {
-            Message::EventClockChanged(is_start, value)
+            Message::Event(EventMessage::EventClockChanged(is_start, value))
         })
-        .on_input(move |value| Message::EventClockChanged(is_start, value))
-        .on_close(Message::CloseEventClockSearch(is_start))
+        .on_input(move |value| Message::Event(EventMessage::EventClockChanged(is_start, value)))
+        .on_close(Message::Event(EventMessage::CloseEventClockSearch(
+            is_start,
+        )))
         .menu_height(240)
         .padding([spacing.space_xxs, spacing.space_xs])
         .font(cosmic::font::default())
         .size(14)
         .width(Length::Fill);
-        // The combo box menu inherits the window's transparency unless scoped here.
         let mut menu_theme = cosmic::theme::active();
         menu_theme.transparent = false;
-        // The native input has no intrinsic text width. Size it using the same font and padding.
         let measure = if value.chars().count() < 5 {
             "00:00".to_owned()
         } else {
@@ -165,11 +166,9 @@ fn recurrence_section<'a>(state: &'a EventEditorState) -> widget::settings::Sect
 
     let mut section = widget::settings::section().add(widget::settings::item(
         fl!("recurrence"),
-        widget::dropdown(
-            recurrence_labels,
-            recurrence_selected,
-            Message::EventEditorRecurrenceChanged,
-        ),
+        widget::dropdown(recurrence_labels, recurrence_selected, |value| {
+            Message::Event(EventMessage::EventEditorRecurrenceChanged(value))
+        }),
     ));
 
     if state.recurrence.freq == RecurrenceFreq::None {
@@ -180,11 +179,9 @@ fn recurrence_section<'a>(state: &'a EventEditorState) -> widget::settings::Sect
     let interval_selected = Some((state.recurrence.interval.max(1) - 1) as usize);
     section = section.add(widget::settings::item(
         fl!("every"),
-        widget::dropdown(
-            interval_labels,
-            interval_selected,
-            Message::EventEditorRecurrenceIntervalChanged,
-        ),
+        widget::dropdown(interval_labels, interval_selected, |value| {
+            Message::Event(EventMessage::EventEditorRecurrenceIntervalChanged(value))
+        }),
     ));
 
     if state.recurrence.freq == RecurrenceFreq::Weekly {
@@ -209,7 +206,9 @@ fn recurrence_section<'a>(state: &'a EventEditorState) -> widget::settings::Sect
                     } else {
                         cosmic::style::Button::Standard
                     })
-                    .on_press(Message::EventEditorRecurrenceWeekdayToggled(idx, !on)),
+                    .on_press(Message::Event(
+                        EventMessage::EventEditorRecurrenceWeekdayToggled(idx, !on),
+                    )),
             );
         }
         section = section.add(widget::settings::item(fl!("on-days"), weekdays));
@@ -223,11 +222,9 @@ fn recurrence_section<'a>(state: &'a EventEditorState) -> widget::settings::Sect
     });
     section = section.add(widget::settings::item(
         fl!("recurrence-ends"),
-        widget::dropdown(
-            end_labels,
-            end_selected,
-            Message::EventEditorRecurrenceEndChanged,
-        ),
+        widget::dropdown(end_labels, end_selected, |value| {
+            Message::Event(EventMessage::EventEditorRecurrenceEndChanged(value))
+        }),
     ));
 
     match state.recurrence.end {
@@ -243,11 +240,9 @@ fn recurrence_section<'a>(state: &'a EventEditorState) -> widget::settings::Sect
             let count_row = widget::row(Vec::new())
                 .spacing(spacing().space_xs)
                 .align_y(cosmic::iced::alignment::Vertical::Center)
-                .push(widget::dropdown(
-                    count_labels,
-                    count_selected,
-                    Message::EventEditorRecurrenceCountChanged,
-                ))
+                .push(widget::dropdown(count_labels, count_selected, |value| {
+                    Message::Event(EventMessage::EventEditorRecurrenceCountChanged(value))
+                }))
                 .push(widget::text::body(fl!("occurrences")));
             section = section.add(widget::settings::item(fl!("end-count"), count_row));
         }
@@ -326,15 +321,20 @@ fn alerts_section(state: &EventEditorState) -> widget::settings::Section<'_, Mes
         if let Some(AlertDraft::Custom(input)) = alert {
             controls = controls.push(
                 widget::text_input(fl!("event-alert-custom-minutes"), input)
-                    .on_input(move |value| Message::EditCustomEventAlert(row, value))
+                    .on_input(move |value| {
+                        Message::Event(EventMessage::EditCustomEventAlert(row, value))
+                    })
                     .width(136),
             );
         }
         controls = controls.push(widget::dropdown(labels, selected, move |index| {
             if index == 0 {
-                Message::RemoveEventAlert(row)
+                Message::Event(EventMessage::RemoveEventAlert(row))
             } else {
-                Message::SetEventAlert(row, presets.get(index - 1).copied())
+                Message::Event(EventMessage::SetEventAlert(
+                    row,
+                    presets.get(index - 1).copied(),
+                ))
             }
         }));
         section = section
@@ -373,26 +373,25 @@ pub fn view<'a>(
             fl!("event-title"),
             &state.summary,
             state.editing_title,
-            Message::ToggleEventTitleEditing,
+            |value| Message::Event(EventMessage::ToggleEventTitleEditing(value)),
         )
         .id(title_id())
-        .on_input(Message::EventEditorSummaryChanged)
+        .on_input(|value| Message::Event(EventMessage::EventEditorSummaryChanged(value)))
         .width(Length::Fill),
     );
     let mut when = widget::settings::section()
         .add(
-            widget::settings::item::builder(fl!("all-day"))
-                .toggler(state.all_day, Message::EventEditorAllDayToggled),
+            widget::settings::item::builder(fl!("all-day")).toggler(state.all_day, |value| {
+                Message::Event(EventMessage::EventEditorAllDayToggled(value))
+            }),
         )
         .add(schedule_row(state, true))
         .add(schedule_row(state, false))
         .add(widget::settings::item(
             fl!("event-calendar"),
-            widget::dropdown(
-                calendar_labels,
-                calendar_selected,
-                Message::EventEditorCalendarChanged,
-            )
+            widget::dropdown(calendar_labels, calendar_selected, |value| {
+                Message::Event(EventMessage::EventEditorCalendarChanged(value))
+            })
             .icons(Cow::Owned(calendar_icons)),
         ));
     let validation_error = state.validation_error();
@@ -406,10 +405,10 @@ pub fn view<'a>(
         &locations.choices,
         &fl!("location"),
         Some(&state.location),
-        Message::SelectEventLocation,
+        |value| Message::Event(EventMessage::SelectEventLocation(value)),
     )
-    .on_input(Message::EventEditorLocationChanged)
-    .on_close(Message::CloseEventLocationSuggestions)
+    .on_input(|value| Message::Event(EventMessage::EventEditorLocationChanged(value)))
+    .on_close(Message::Event(EventMessage::CloseEventLocationSuggestions))
     .menu_height(240)
     .width(Length::Fill);
     let mut location_theme = cosmic::theme::active();
@@ -436,7 +435,7 @@ pub fn view<'a>(
     let details = details.add(
         widget::text_editor(notes)
             .placeholder(fl!("event-notes"))
-            .on_action(Message::EventEditorNotesChanged)
+            .on_action(|value| Message::Event(EventMessage::EventEditorNotesChanged(value)))
             .height(88)
             .padding(spacing().space_xxs)
             .class(cosmic::theme::iced::TextEditor::Custom(Box::new(
@@ -446,26 +445,33 @@ pub fn view<'a>(
 
     let mut options = widget::settings::section().add(
         widget::settings::item::builder(fl!("event-more-options"))
-            .toggler(state.more_options, |_| Message::ToggleEventOptions),
+            .toggler(state.more_options, |_| {
+                Message::Event(EventMessage::ToggleEventOptions)
+            }),
     );
     if state.more_options {
         if !state.all_day {
             options = options.add(
                 widget::settings::item::builder(fl!("event-floating-time"))
-                    .toggler(state.floating, Message::EventEditorFloatingToggled),
+                    .toggler(state.floating, |value| {
+                        Message::Event(EventMessage::EventEditorFloatingToggled(value))
+                    }),
             );
             if !state.floating {
                 options = options.add(widget::settings::item(
                     fl!("event-timezone"),
                     widget::text_input(fl!("event-timezone-placeholder"), &state.timezone)
-                        .on_input(Message::EventEditorTimezoneChanged)
+                        .on_input(|value| {
+                            Message::Event(EventMessage::EventEditorTimezoneChanged(value))
+                        })
                         .width(Length::Fixed(240.0)),
                 ));
             }
         }
         options = options.add(
-            widget::settings::item::builder(fl!("task"))
-                .toggler(state.is_task, Message::EventEditorTaskToggled),
+            widget::settings::item::builder(fl!("task")).toggler(state.is_task, |value| {
+                Message::Event(EventMessage::EventEditorTaskToggled(value))
+            }),
         );
     }
     let mut sections = Vec::new();
@@ -482,7 +488,7 @@ pub fn view<'a>(
                         RecurrenceScope::OPTIONS
                             .iter()
                             .position(|scope| *scope == state.recurrence_scope),
-                        Message::EventEditorScopeChanged,
+                        |value| Message::Event(EventMessage::EventEditorScopeChanged(value)),
                     ),
                 ))
                 .into(),
@@ -508,11 +514,15 @@ pub fn view<'a>(
                 .height(Length::Fixed(420.0)),
         )
         .primary_action(
-            widget::button::suggested(fl!("save"))
-                .on_press_maybe(validation_error.is_none().then_some(Message::SaveEvent)),
+            widget::button::suggested(fl!("save")).on_press_maybe(
+                validation_error
+                    .is_none()
+                    .then_some(Message::Event(EventMessage::SaveEvent)),
+            ),
         )
         .secondary_action(
-            widget::button::standard(fl!("cancel")).on_press(Message::CloseEventEditor),
+            widget::button::standard(fl!("cancel"))
+                .on_press(Message::Event(EventMessage::CloseEventEditor)),
         )
         .width(Length::Fixed(640.0));
 
@@ -521,16 +531,28 @@ pub fn view<'a>(
             match state.recurrence_scope {
                 RecurrenceScope::Occurrence => (
                     fl!("delete-occurrence"),
-                    Message::DeleteOccurrence(event_id, state.occurrence_start),
+                    Message::Event(EventMessage::DeleteOccurrence(
+                        event_id,
+                        state.occurrence_start,
+                    )),
                 ),
                 RecurrenceScope::Following => (
                     fl!("delete-following"),
-                    Message::DeleteFollowing(event_id, state.occurrence_start),
+                    Message::Event(EventMessage::DeleteFollowing(
+                        event_id,
+                        state.occurrence_start,
+                    )),
                 ),
-                RecurrenceScope::Series => (fl!("delete-series"), Message::DeleteEvent(event_id)),
+                RecurrenceScope::Series => (
+                    fl!("delete-series"),
+                    Message::Event(EventMessage::DeleteEvent(event_id)),
+                ),
             }
         } else {
-            (fl!("delete"), Message::DeleteEvent(event_id))
+            (
+                fl!("delete"),
+                Message::Event(EventMessage::DeleteEvent(event_id)),
+            )
         };
         dialog = dialog.tertiary_action(widget::button::destructive(label).on_press(action));
     }

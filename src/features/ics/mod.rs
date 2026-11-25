@@ -5,6 +5,9 @@
 //! `chrono` <-> `time` conversion needed here is on the *read* path
 //! (`icalendar` only exposes parsed date-times as `chrono` types).
 
+mod message;
+pub use message::IcsMessage;
+
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, NaiveDate, Offset, TimeZone, Utc};

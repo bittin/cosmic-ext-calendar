@@ -1,6 +1,7 @@
 use cosmic::app::Settings;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::config::{AppTheme, Config};
 use crate::i18n;
 
 pub fn init_runtime() {
@@ -34,4 +35,14 @@ pub fn settings(keep_running: bool) -> Settings {
         )
         .exit_on_close(!keep_running)
         .no_main_window(keep_running)
+}
+
+#[derive(Debug, Clone)]
+pub enum SettingsMessage {
+    UpdateConfig(Config),
+    SetTheme(AppTheme),
+    SetDisplayTimezone(usize),
+    PhotonEndpointChanged(String),
+    SavePhotonEndpoint,
+    DisableOnlineLocations,
 }

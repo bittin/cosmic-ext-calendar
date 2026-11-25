@@ -10,10 +10,17 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::features::calendar::display_time;
+use crate::features::calendar_management::model::CalendarKey;
 use crate::features::event::model::{Event, EventTime};
 use crate::fl;
 use crate::shared::ids::EventId;
-use crate::shared::storage::{LocalStorage, data_dir, write_json_atomic};
+use crate::shared::storage::{data_dir, write_json_atomic, LocalStorage};
+
+#[derive(Debug, Clone)]
+pub enum NotificationMessage {
+    CheckAlerts,
+    AlertsChecked,
+}
 
 pub const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const GRACE: Duration = Duration::minutes(5);
@@ -73,8 +80,6 @@ impl DeliveryHistory {
                 failed = true;
             }
         }
-        // Leave the previous checkpoint in place after a delivery error so
-        // failed alerts can be retried without repeating successful ones.
         self.last_checked = Some(if failed { since } else { now });
     }
 }
@@ -87,7 +92,7 @@ struct DueAlert {
     all_day: bool,
 }
 
-pub fn check_alerts() -> crate::Result<()> {
+pub fn check_alerts(remote_events: &[Event]) -> crate::Result<()> {
     let root = data_dir()?;
     if !root.try_exists()? {
         return Ok(());
@@ -103,16 +108,14 @@ pub fn check_alerts() -> crate::Result<()> {
         Err(TryLockError::Error(err)) => return Err(err.into()),
     }
 
-    // Read calendars and the journal under the delivery lock so a worker and
-    // a window can run concurrently without sending the same alert.
     let storage = LocalStorage::load()?;
     let path = root.join("notification-delivery.json");
     let mut history = DeliveryHistory::load(&path)?;
     let previous_checkpoint = history.last_checked;
-    history.deliver(storage.all_events(), OffsetDateTime::now_utc(), notify);
+    let local_events = storage.all_events().into_iter()
+        .filter(|event| matches!(event.calendar, CalendarKey::Local(_)));
+    history.deliver(local_events.chain(remote_events), OffsetDateTime::now_utc(), notify);
     if storage.load_error().is_some() {
-        // Deliver alerts from readable records without skipping over a
-        // calendar or event that becomes readable again on the next pass.
         history.last_checked = previous_checkpoint;
     }
     write_json_atomic(&path, &history)
@@ -132,7 +135,7 @@ pub fn run_worker() -> crate::Result<()> {
         Err(TryLockError::Error(err)) => return Err(err.into()),
     }
     loop {
-        if let Err(err) = check_alerts() {
+        if let Err(err) = check_alerts(&[]) {
             tracing::warn!("could not check event alerts: {err}");
         }
         std::thread::sleep(CHECK_INTERVAL);
